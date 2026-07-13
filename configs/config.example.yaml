@@ -1,0 +1,34 @@
+# MetaTrader 5 — XAUUSD bar fetcher
+symbol: XAUUSD
+
+# M1, M5, M15, M30, H1, H4, D1, W1, MN1
+timeframe: D1
+
+date_range:
+  start_date: "2010-01-01"
+  end_date: "2026-07-08"
+
+# Data diambil per chunk agar tidak overload MT5
+chunk:
+  unit: year   # year | month
+  step: 1
+
+output:
+  directory: ./data/raw
+  format: csv
+  combine_chunks: true
+
+mt5:
+  # Kosongkan path jika MT5 sudah terinstall & login di terminal
+  path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+  login: 0
+  password: "CHANGE_ME"
+  server: "YOUR_BROKER_SERVER"
+
+logging:
+  level: INFO
+  directory: ./logs
+  filename: xauusd_fetcher.log
+  max_bytes: 10485760
+  backup_count: 5
+  console: true

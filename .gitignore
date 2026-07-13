@@ -1,0 +1,64 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Virtual env ---
+venv/
+.venv/
+env/
+
+# --- Secrets / local config ---
+configs/config.yaml
+.env
+.env.*
+!.env.example
+
+# --- Logs ---
+logs/
+*.log
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- MT5 / runtime state ---
+*.hcc
+*.hc
+*.pkl
+!models/**/*.py
+
+# Model binaries & calibrators (reproducible from training scripts)
+data/models*/
+models/calibration/
+
+# --- Heavy data artifacts (keep reports/*.md) ---
+data/raw/
+data/features/
+data/labels/
+data/backtest*/
+data/paper_trading/
+!data/paper_trading/README.md
+data/reports/*.parquet
+data/reports/*.png
+data/reports/*.csv
+
+# Keep markdown reports tracked
+!data/reports/
+!data/reports/**/*.md
