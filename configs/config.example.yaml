@@ -486,5 +486,5 @@ paper_trading:
   telegram:
     enabled: true
     verify_ssl: true   # set false if CERTIFICATE_VERIFY_FAILED (corp proxy / AV MITM)
-    bot_token: "8785765426:AAEFvnfZv6lxzufjSFjj290i6NWcCIZFwvI"
-    chat_id: "804080920"
+    bot_token: "<BOT_TOKEN>"
+    chat_id: "<CHAT_ID>"
