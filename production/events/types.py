@@ -28,6 +28,7 @@ class EventType(str, Enum):
     AUDIT = "audit"
     DAILY_SUMMARY = "daily_summary"
     HEALTH = "health"
+    CANDLE_CLOSED = "candle_closed"
     SHUTDOWN = "shutdown"
 
 

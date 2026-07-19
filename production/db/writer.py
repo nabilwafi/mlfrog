@@ -188,6 +188,30 @@ class PostgresWriter:
             },
         )
 
+    def upsert_candle(self, row: dict[str, Any]) -> None:
+        sql = """
+        INSERT INTO trading.candles (
+            symbol, timeframe, timestamp, open, high, low, close,
+            tick_volume, spread, real_volume, source, features
+        ) VALUES (
+            %(symbol)s, %(timeframe)s, %(timestamp)s, %(open)s, %(high)s, %(low)s, %(close)s,
+            %(tick_volume)s, %(spread)s, %(real_volume)s, %(source)s, %(features)s::jsonb
+        )
+        ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
+            open = EXCLUDED.open,
+            high = EXCLUDED.high,
+            low = EXCLUDED.low,
+            close = EXCLUDED.close,
+            tick_volume = EXCLUDED.tick_volume,
+            spread = EXCLUDED.spread,
+            real_volume = EXCLUDED.real_volume,
+            features = EXCLUDED.features
+        """
+        payload = dict(row)
+        feats = payload.get("features")
+        payload["features"] = json.dumps(feats) if feats is not None else None
+        self._execute(sql, payload)
+
     def _execute(self, sql: str, params: dict[str, Any]) -> None:
         with self.connection() as conn:
             if conn is None:
