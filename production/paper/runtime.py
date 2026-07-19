@@ -49,6 +49,12 @@ class PaperRuntime:
             self.source.connect()
         while not self._stop.is_set():
             try:
+                # Emit yesterday's summary before processing today's bars/signals
+                today = datetime.now(timezone.utc).date()
+                if last_day is not None and today != last_day:
+                    self.pipeline.emit_daily_summary()
+                last_day = today
+
                 if hasattr(self.source, "poll"):
                     tick = self.source.poll()
                     if tick.bar is not None:
@@ -80,11 +86,6 @@ class PaperRuntime:
                     signals = self.source.next_signals()
                     for sig in signals:
                         self.pipeline.process_signal(sig)
-                # daily summary once per UTC day rollover
-                today = datetime.now(timezone.utc).date()
-                if last_day is not None and today != last_day:
-                    self.pipeline.emit_daily_summary()
-                last_day = today
             except Exception:
                 logger.exception("runtime_tick_failed")
                 self.bus.publish(

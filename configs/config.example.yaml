@@ -470,9 +470,22 @@ atre:
   n_permutation: 1000
   output_directory: ./artifacts/research/atre
 
+# Temporal Stability & Dataset Aging - Sprint 28 (research only; production frozen)
+# Brief sometimes labeled Sprint 27; Sprint 27 in this repo is paper-trading infra.
+temporal_stability:
+  timeframe: H1
+  starting_equity: 80.0
+  n_monte_carlo: 300
+  min_train_years: 5
+  # side: long          # optional speed filter
+  # max_years: 10       # optional smoke limit
+  # dataset_directory: ./artifacts/datasets/XAUUSD/H1
+  output_directory: ./artifacts/research/temporal_stability
+
 # Paper trading runtime - Sprint 27 (infra only; research frozen)
 paper_trading:
   starting_equity: 10000
+  environment: paper             # shown in HEALTHCHECK (paper | live | staging ...)
   poll_seconds: 5
   event_workers: 2
   event_queue_size: 10000
@@ -492,4 +505,9 @@ paper_trading:
     enabled: true
     verify_ssl: true   # set false if CERTIFICATE_VERIFY_FAILED (corp proxy / AV MITM)
     bot_token: "<BOT_TOKEN>"
-    chat_id: "<CHAT_ID>"
+    chat_id: "<FORUM_CHAT_ID>"           # same group for all topics
+    trade_thread_id: 3                   # trades topic (legacy: message_thread_id)
+    health_message_thread_id: 2          # healthcheck topic (reuses chat_id)
+    daily_message_thread_id: 4           # daily report topic (reuses chat_id)
+    error_thread_id: 5                   # execution error topic (reuses chat_id)
+    # only set health_chat_id / daily_chat_id / error_chat_id if those go to a different group

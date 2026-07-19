@@ -63,11 +63,13 @@ class ProductionPipeline:
         state: PortfolioState,
         broker: PaperBroker | None = None,
         symbol: str = "XAUUSD",
+        environment: str = "paper",
     ) -> None:
         self.bus = bus
         self.state = state
         self.broker = broker or PaperBroker()
         self.symbol = symbol
+        self.environment = str(environment or "paper")
 
     def process_signal(self, sig: IncomingSignal) -> dict[str, Any]:
         t_inf0 = time.perf_counter()
@@ -242,6 +244,7 @@ class ProductionPipeline:
                     "probability": sig.probability,
                     "meta_probability": sig.meta_probability,
                     "confidence": sig.confidence,
+                    "environment": self.environment,
                 },
                 correlation_id=corr,
             )
@@ -310,34 +313,49 @@ class ProductionPipeline:
                 "confidence": pos.meta.get("confidence"),
                 "equity": self.state.equity,
                 "broker_response": fill.broker_response,
+                "environment": self.environment,
             }
             self.bus.publish(make_event(EventType.TRADE_CLOSED, payload, correlation_id=pos.correlation_id))
             closed.append(payload)
         return closed
 
-    def emit_daily_summary(self, day: datetime | None = None) -> None:
+    def emit_daily_summary(self, day: datetime | None = None, *, extra: dict[str, Any] | None = None) -> None:
+        """Publish stats for the current trading day, then roll calendar if needed."""
         now = day or datetime.now(timezone.utc)
+        trades = int(self.state.trades_today)
+        wins = int(self.state.wins_today)
+        losses = max(0, trades - wins)
+        wr = (wins / trades) if trades else 0.0
+        start_eq = float(self.state.day_start_equity or self.state.equity)
+        pnl = float(self.state.pnl_today)
+        pnl_pct = (pnl / start_eq * 100.0) if start_eq > 0 else 0.0
+        status = "ok"
+        if self.state.heat_triggered_today or self.state.equity <= 0:
+            status = "degraded"
+        report_date = self.state.day.isoformat() if self.state.day else now.date().isoformat()
+        payload: dict[str, Any] = {
+            "date": report_date,
+            "status": status,
+            "equity": self.state.equity,
+            "daily_r": self.state.day_pnl / max(self.state.r_unit(), 1e-9),
+            "drawdown": self.state.drawdown(),
+            "heat_triggered": self.state.heat_triggered_today,
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "winrate": wr,
+            "pnl": pnl,
+            "pnl_pct": pnl_pct,
+            "skipped": self.state.skips,
+            "meta_rejects": self.state.meta_rejects,
+            "confidence_rejects": self.state.confidence_rejects,
+            "uptime_seconds": time.monotonic() - float(self.state.started_mono),
+        }
+        if extra:
+            payload.update(extra)
+        self.bus.publish(make_event(EventType.DAILY_SUMMARY, payload))
+        # roll after publish so midnight summary still has yesterday's counters
         self.state.roll_day(now)
-        wr = (self.state.wins_today / self.state.trades_today) if self.state.trades_today else 0.0
-        self.bus.publish(
-            make_event(
-                EventType.DAILY_SUMMARY,
-                {
-                    "date": self.state.day.isoformat() if self.state.day else now.date().isoformat(),
-                    "equity": self.state.equity,
-                    "daily_r": self.state.day_pnl / max(self.state.r_unit(), 1e-9),
-                    "drawdown": self.state.drawdown(),
-                    "heat_triggered": self.state.heat_triggered_today,
-                    "trades": self.state.trades_today,
-                    "wins": self.state.wins_today,
-                    "winrate": wr,
-                    "pnl": self.state.pnl_today,
-                    "skipped": self.state.skips,
-                    "meta_rejects": self.state.meta_rejects,
-                    "confidence_rejects": self.state.confidence_rejects,
-                },
-            )
-        )
 
     def _skip(
         self,
@@ -357,6 +375,7 @@ class ProductionPipeline:
                     "reason": reason,
                     "threshold": threshold,
                     "current_value": current,
+                    "environment": self.environment,
                     "detail": {
                         "meta_probability": sig.meta_probability,
                         "confidence": sig.confidence,
