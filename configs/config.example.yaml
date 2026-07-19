@@ -1,25 +1,27 @@
-# MetaTrader 5 — XAUUSD bar fetcher
+# Market data â€” Sprint 1
 symbol: XAUUSD
 
 # M1, M5, M15, M30, H1, H4, D1, W1, MN1
-timeframe: D1
+timeframe: H1
+timezone: UTC
 
 date_range:
   start_date: "2010-01-01"
   end_date: "2026-07-08"
 
-# Data diambil per chunk agar tidak overload MT5
 chunk:
-  unit: year   # year | month
+  unit: year
   step: 1
 
 output:
-  directory: ./data/raw
-  format: csv
+  directory: ./artifacts/raw
+  format: parquet
   combine_chunks: true
 
+validation:
+  check_continuity: false
+
 mt5:
-  # Kosongkan path jika MT5 sudah terinstall & login di terminal
   path: "C:/Program Files/MetaTrader 5/terminal64.exe"
   login: 0
   password: "CHANGE_ME"
@@ -27,8 +29,462 @@ mt5:
 
 logging:
   level: INFO
-  directory: ./logs
-  filename: xauusd_fetcher.log
+  directory: ./artifacts/logs
+  filename: market_data.log
   max_bytes: 10485760
   backup_count: 5
   console: true
+
+# Feature engineering â€” Sprint 2
+features:
+  feature_version: v1
+  pipeline_version: "1.0"
+  drop_na: true
+  output_directory: ./artifacts/features
+
+  indicators:
+    - name: ema
+      params: {period: 20, column: close}
+    - name: ema
+      params: {period: 50, column: close}
+    - name: rsi
+      params: {period: 14, column: close}
+    - name: atr
+      params: {period: 14}
+    - name: adx
+      params: {period: 14}
+    - name: macd
+      params: {fast: 12, slow: 26, signal: 9, column: close}
+    - name: returns
+      params: {periods: 1, column: close}
+    - name: log_returns
+      params: {periods: 1, column: close}
+    - name: volatility
+      params: {window: 20, column: close, use_log: true}
+    - name: candle
+      params: {}
+    - name: session
+      params:
+        timezone: UTC
+        london_hours: [7, 16]
+        ny_hours: [12, 21]
+        asia_hours: [0, 9]
+
+  interactions:
+    - name: ema_distance
+      params: {ema_column: ema_20_close, price_column: close, scale_column: atr_14}
+    - name: ema_distance
+      params: {ema_column: ema_50_close, price_column: close, scale_column: atr_14}
+    - name: atr_ratio
+      params: {atr_column: atr_14, price_column: close}
+    - name: body_ratio
+      params: {}
+    - name: wick_ratio
+      params: {}
+
+# Label engineering â€” Sprint 3
+labels:
+  strategy: triple_barrier
+  label_version: v1
+  output_directory: ./artifacts/labels
+  sides:
+    - long
+    - short
+  params:
+    horizon: 8
+    take_profit_atr_mult: 2.0
+    stop_loss_atr_mult: 1.5
+    tp_atr_mult: 2.0
+    sl_atr_mult: 1.5
+    atr_period: 14
+    # risk_reward_ratio: 1.333
+
+# Dataset builder â€” Sprint 4
+datasets:
+  feature_version: v1
+  label_version: v1
+  strategy: triple_barrier
+  sides:
+    - long
+    - short
+  drop_na: true
+  output_directory: ./artifacts/datasets
+  splits:
+    train:
+      start: "2010-01-01"
+      end: "2023-12-31"
+    validation:
+      start: "2024-01-01"
+      end: "2024-12-31"
+    test:
+      start: "2025-01-01"
+      end: "2025-12-31"
+    sealed:
+      start: "2026-01-01"
+      end: "2026-12-31"
+
+# Model training â€” Sprint 5
+models:
+  algorithm: lightgbm
+  side: long
+  dataset_version: v1
+  target_mode: exclude_timeout  # exclude_timeout | binary_vs_rest
+  random_seed: 42
+  threshold: 0.5
+  output_directory: ./artifacts/models
+  algorithms:
+    lightgbm:
+      params:
+        learning_rate: 0.05
+        num_leaves: 63
+        max_depth: -1
+        min_child_samples: 40
+        subsample: 0.8
+        colsample_bytree: 0.8
+        num_boost_round: 500
+        early_stopping_rounds: 50
+        class_weight: true
+        verbosity: -1
+    xgboost:
+      params:
+        learning_rate: 0.05
+        max_depth: 6
+        min_child_weight: 1.0
+        subsample: 0.8
+        colsample_bytree: 0.8
+        num_boost_round: 500
+        early_stopping_rounds: 50
+        class_weight: true
+        verbosity: 0
+    catboost:
+      params:
+        learning_rate: 0.05
+        depth: 6
+        l2_leaf_reg: 3.0
+        iterations: 500
+        early_stopping_rounds: 50
+        class_weight: true
+        verbose: false
+
+# Diagnostics â€” Sprint 5.5
+diagnostics:
+  side: long
+  threshold: 0.5
+  target_mode: exclude_timeout
+  output_directory: ./artifacts/diagnostics
+  splits:
+    - train
+    - validation
+    - test
+    - sealed
+
+# Research â€” Sprint 5.6
+research:
+  side: long
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  dataset_version: v1
+  output_directory: ./artifacts/research
+  splits:
+    - train
+    - validation
+    - test
+    - sealed
+  windows:
+    - train_start_year: 2020
+      train_end_year: 2022
+      valid_year: 2023
+    - train_start_year: 2021
+      train_end_year: 2023
+      valid_year: 2024
+    - train_start_year: 2022
+      train_end_year: 2024
+      valid_year: 2025
+    - train_start_year: 2023
+      train_end_year: 2025
+      valid_year: 2026
+
+# Feature engineering â€” Sprint 6 (stationary / normalized)
+feature_engineering:
+  drop_na: true
+  output_directory: ./artifacts/features
+  ema_fast: 20
+  ema_slow: 50
+  atr_period: 14
+  rsi_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  builders:
+    - trend
+    - volatility
+    - momentum
+    - candle
+    - session
+    - statistical
+  builder_params:
+    trend:
+      slope_lookback: 3
+    volatility:
+      rolling_volatility_window: 20
+      atr_percentile_window: 252
+    momentum:
+      zscore_window: 100
+      rank_window: 100
+      momentum_lookback: 10
+    candle:
+      rank_window: 100
+    statistical:
+      window: 20
+      quantile: 0.75
+
+# Feature diagnostics â€” Sprint 6.5
+feature_diagnostics:
+  side: long
+  target_mode: exclude_timeout
+  corr_threshold: 0.95
+  random_seed: 42
+  output_directory: ./artifacts/research
+
+# Feature ablation â€” Sprint 7
+feature_ablation:
+  side: long
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  output_directory: ./artifacts/research/feature_ablation
+
+# Model benchmark â€” Sprint 8 (algorithm comparison, not tuning)
+model_benchmark:
+  side: long
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  output_directory: ./artifacts/research/model_benchmark
+  algorithms:
+    - logistic_regression
+    - random_forest
+    - extra_trees
+    - hist_gradient_boosting
+    - xgboost
+    - lightgbm
+    - catboost
+  # Optional per-algorithm overrides (merged on top of fair defaults)
+  model_params: {}
+
+# Market context â€” Sprint 9 (H4 context â†’ join H1; not entry/execution)
+market_context:
+  base_timeframe: H1
+  context_timeframe: H4
+  context_version: v1
+  feature_version: v2
+  drop_na: true
+  run_feature_engineering: true
+  build_dataset_v2: true
+  sides:
+    - long
+    - short
+  output_directory: ./artifacts/context
+  builder_params:
+    ema_fast: 20
+    ema_slow: 50
+    atr_period: 14
+    vol_percentile_window: 50
+    bb_window: 20
+    swing_window: 5
+    slope_lookback: 3
+
+# Context impact â€” Sprint 10 (does H4 context help H1? research only)
+context_impact:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  output_directory: ./artifacts/research/context_impact
+
+# H4 structure enhancement â€” Sprint 11
+h4_structure:
+  base_timeframe: H1
+  context_timeframe: H4
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  drop_na: true
+  output_directory: ./artifacts/research/h4_structure
+  builder_params:
+    atr_period: 14
+    swing_window: 5
+    range_window: 20
+
+# Structure selection â€” Sprint 12 (robust subset; no new features)
+structure_selection:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  top_k: 5
+  compute_shap: true
+  output_directory: ./artifacts/research/structure_selection
+
+# Model v2 validation â€” Sprint 13 (Long/Short A/B with selected structure)
+model_v2:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  threshold: 0.5
+  random_seed: 42
+  compute_shap: true
+  output_directory: ./artifacts/models/v2
+
+# Probability quality â€” Sprint 14 (v2 OOF probs; no calibration fit)
+probability_quality:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  random_seed: 42
+  output_directory: ./artifacts/research/probability_quality
+
+# Probability collapse diagnosis â€” Sprint 15
+probability_diagnosis:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  random_seed: 42
+  output_directory: ./artifacts/research/probability_diagnosis
+
+# Probability calibration & percentile thresholds â€” Sprint 16
+probability_calibration:
+  sides:
+    - long
+    - short
+  algorithm: lightgbm
+  target_mode: exclude_timeout
+  random_seed: 42
+  # Research assumption: fixed fractional cost per trade (return units)
+  transaction_cost: 0.00015
+  output_directory: ./artifacts/research/probability_calibration
+
+# Meta dataset suitability â€” research only (no meta training)
+meta_dataset_validation:
+  sides:
+    - long
+    - short
+  transaction_cost: 0.00015
+  output_directory: ./artifacts/research/meta_dataset_validation
+
+# Meta feature research â€” Sprint 18 (no meta-model training)
+meta_feature_research:
+  percentile: 0.03
+  output_directory: ./artifacts/research/meta_feature_research
+
+# Meta feature ablation - Sprint 19 (fixed LGBM params; NOT final meta model)
+meta_feature_ablation:
+  timeframe: H1
+  random_seed: 42
+  threshold: 0.5
+  num_boost_round: 200
+  early_stopping_rounds: 30
+  transaction_cost: 0.00015
+  compute_shap: true
+  output_directory: ./artifacts/research/meta_feature_ablation
+
+# Production Meta Model - Sprint 20 (Trade vs Skip; primary frozen; no HPO)
+meta_model:
+  timeframe: H1
+  percentile: 0.03
+  random_seed: 42
+  num_boost_round: 200
+  early_stopping_rounds: 30
+  reference_threshold: 0.50
+  starting_equity: 80.0
+  transaction_cost: 0.00015
+  output_directory: ./artifacts/research/meta_model
+
+# Portfolio backtest - Sprint 21 (no ML; meta thr fixed 0.45)
+portfolio_backtest:
+  timeframe: H1
+  starting_equity: 80.0
+  meta_threshold: 0.45
+  n_monte_carlo: 1000
+  random_seed: 42
+  preferred_scenario: C_risk_1pct_frac
+  output_directory: ./artifacts/research/portfolio_backtest
+
+# Confidence layer - Sprint 22 (frozen Primary + Meta; no retrain)
+confidence_layer:
+  timeframe: H1
+  meta_gate: 0.45
+  starting_equity: 80.0
+  output_directory: ./artifacts/research/confidence_layer
+
+# Trade Quality Engine - Sprint 23 (execution / sizing; frozen models)
+trade_quality:
+  timeframe: H1
+  meta_gate: 0.45
+  starting_equity: 80.0
+  output_directory: ./artifacts/research/trade_quality
+
+# Portfolio Heat - Sprint 24 (execution heat; frozen Primary/Meta/Confidence)
+portfolio_heat:
+  timeframe: H1
+  starting_equity: 80.0
+  n_monte_carlo: 500
+  n_bootstrap: 1000
+  n_permutation: 1000
+  output_directory: ./artifacts/research/portfolio_heat
+
+# Position Management - Sprint 25 (exits/BE/trail/pyramid; frozen stack)
+position_mgmt:
+  timeframe: H1
+  starting_equity: 80.0
+  n_monte_carlo: 500
+  n_bootstrap: 1000
+  n_permutation: 1000
+  output_directory: ./artifacts/research/position_mgmt
+
+# ATRE - Sprint 26 (adverse recovery; frozen stack)
+atre:
+  timeframe: H1
+  starting_equity: 80.0
+  n_monte_carlo: 500
+  n_bootstrap: 1000
+  n_permutation: 1000
+  output_directory: ./artifacts/research/atre
+
+# Paper trading runtime - Sprint 27 (infra only; research frozen)
+paper_trading:
+  starting_equity: 10000
+  poll_seconds: 5
+  event_workers: 2
+  event_queue_size: 10000
+  monitoring_host: 127.0.0.1
+  monitoring_port: 8787
+  health_interval_seconds: 300   # Telegram heartbeat; 0 = start/stop only
+  health_probe_throttle_seconds: 60  # min gap when /health also notifies Telegram
+  check_mt5: true                # include MT5 terminal/account in HEALTH (+ 503 if down)
+  # postgres_dsn: "postgresql://user:pass@localhost:5432/xauusd"
+  postgres_dsn: "postgresql://trading:trading@localhost:5432/trading"
+  telegram:
+    enabled: true
+    verify_ssl: true   # set false if CERTIFICATE_VERIFY_FAILED (corp proxy / AV MITM)
+    bot_token: "<BOT_TOKEN>"
+    chat_id: "<CHAT_ID>"

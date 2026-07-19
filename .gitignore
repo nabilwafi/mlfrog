@@ -26,10 +26,6 @@ configs/config.yaml
 .env.*
 !.env.example
 
-# --- Logs ---
-logs/
-*.log
-
 # --- IDE / OS ---
 .idea/
 .vscode/
@@ -38,27 +34,16 @@ logs/
 Thumbs.db
 desktop.ini
 
-# --- MT5 / runtime state ---
+# --- MT5 / runtime ---
 *.hcc
 *.hc
 *.pkl
-!models/**/*.py
+*.log
 
-# Model binaries & calibrators (reproducible from training scripts)
-data/models*/
-models/calibration/
+# --- Blobs ---
+artifacts/
 
-# --- Heavy data artifacts (keep reports/*.md) ---
-data/raw/
-data/features/
-data/labels/
-data/backtest*/
-data/paper_trading/
-!data/paper_trading/README.md
-data/reports/*.parquet
-data/reports/*.png
-data/reports/*.csv
-
-# Keep markdown reports tracked
-!data/reports/
-!data/reports/**/*.md
+# markdown
+ARCHITECTURE.md
+DOMAIN_MODEL.md
+LIFECYCLE.md
