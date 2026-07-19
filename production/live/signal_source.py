@@ -86,20 +86,37 @@ class LiveMT5SignalSource:
             ts = ts.tz_convert("UTC")
         if self._last_bar_ts is not None and ts <= self._last_bar_ts:
             return LiveTick(bar=None, signals=[])
-        self._last_bar_ts = ts
 
-        h1 = self._feed.fetch(self._timeframe, count=self._history)
-        h4 = self._feed.fetch("H4", count=max(120, self._history // 4))
-        d1 = self._feed.fetch("D1", count=120)
-        m5 = self._feed.fetch("M5", count=min(2000, self._history * 12))
-        panel = self._features.build_panel(h1=h1, h4=h4, d1=d1, m5=m5)
+        try:
+            h1 = self._feed.fetch(self._timeframe, count=self._history)
+            h4 = self._feed.fetch("H4", count=max(120, self._history // 4))
+            d1 = self._feed.fetch("D1", count=120)
+            m5 = self._feed.fetch("M5", count=min(2000, self._history * 12))
+            if h1.empty:
+                logger.warning("live_h1_empty ts=%s — MT5 history missing?", ts)
+                return LiveTick(bar=None, signals=[])
+            panel = self._features.build_panel(h1=h1, h4=h4, d1=d1, m5=m5)
+        except Exception:
+            logger.exception("live_feature_build_failed ts=%s", ts)
+            return LiveTick(bar=None, signals=[])
+
         if panel.empty:
             logger.warning("live_feature_panel_empty ts=%s", ts)
             return LiveTick(bar=None, signals=[])
 
+        # only advance cursor after we can actually emit a bar
+        self._last_bar_ts = ts
+
         feat_row = panel.loc[panel["timestamp"] == ts]
         if feat_row.empty:
-            feat_row = panel.iloc[[-1]]
+            # feature matrix may use close-time vs MT5 open-time — take nearest <= ts
+            prior = panel.loc[panel["timestamp"] <= ts]
+            feat_row = prior.iloc[[-1]] if not prior.empty else panel.iloc[[-1]]
+            logger.warning(
+                "live_feature_ts_mismatch bar_ts=%s feat_ts=%s",
+                ts.isoformat(),
+                feat_row.iloc[0]["timestamp"],
+            )
         feat_row = feat_row.iloc[0]
         atr = float(feat_row.get("atr_percent", 0.01) or 0.01) * float(row["close"])
         if not pd.notna(atr) or atr <= 0:
@@ -107,12 +124,16 @@ class LiveMT5SignalSource:
 
         signals: list[IncomingSignal] = []
         for side in ("long", "short"):
-            scored = self._inference.score_row(
-                feat_row,
-                side=side,
-                entry_price=float(row["close"]),
-                atr=atr,
-            )
+            try:
+                scored = self._inference.score_row(
+                    feat_row,
+                    side=side,
+                    entry_price=float(row["close"]),
+                    atr=atr,
+                )
+            except Exception:
+                logger.exception("live_score_failed side=%s ts=%s", side, ts)
+                continue
             if scored is None:
                 continue
             signals.append(_to_incoming(scored, symbol=self._symbol))
