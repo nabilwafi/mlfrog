@@ -18,6 +18,20 @@ logger = logging.getLogger(__name__)
 _BAR_COLS = ["timestamp", "open", "high", "low", "close", "tick_volume", "spread", "real_volume"]
 _IPC_LOST = -10004
 
+_TF_SECONDS = {
+    "M1": 60,
+    "M5": 300,
+    "M15": 900,
+    "M30": 1800,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400,
+}
+
+
+def _tf_seconds(timeframe: str) -> int:
+    return int(_TF_SECONDS.get(str(timeframe).upper(), 3600))
+
 
 def rates_to_frame(rates: Any, *, tz: str = "UTC") -> pd.DataFrame:
     if rates is None or len(rates) == 0:
@@ -110,8 +124,26 @@ class MT5CandleFeed:
         return pd.DataFrame(columns=_BAR_COLS)
 
     def latest_closed_bar(self, timeframe: str = "H1") -> pd.DataFrame | None:
-        """Return the most recently *closed* bar (skip forming bar)."""
-        frame = self.fetch(timeframe, count=3)
+        """
+        Return the most recently *closed* bar.
+        MT5 timestamps are bar OPEN time. While a bar is still forming it is
+        the last row — skip it. When the market is closed (weekend/gap), the
+        last row is already closed, so use it (do not skip to [-2]).
+        """
+        frame = self.fetch(timeframe, count=5)
+        if frame.empty:
+            return None
+        last = frame.iloc[-1]
+        ts = pd.Timestamp(last["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        else:
+            ts = ts.tz_convert("UTC")
+        bar_end = ts + pd.Timedelta(seconds=_tf_seconds(timeframe))
+        now = pd.Timestamp.now(tz="UTC")
+        if bar_end <= now:
+            # last bar already fully closed (weekend / holiday / exact boundary)
+            return frame.iloc[[-1]].reset_index(drop=True)
         if len(frame) < 2:
             return None
-        return frame.iloc[-2:-1].reset_index(drop=True)
+        return frame.iloc[[-2]].reset_index(drop=True)

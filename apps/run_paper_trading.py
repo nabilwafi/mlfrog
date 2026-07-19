@@ -178,6 +178,16 @@ def main(argv: list[str] | None = None) -> int:
     bus = EventBus(maxsize=int(paper_cfg.get("event_queue_size", 10_000)))
     metrics = MetricsCollector()
     db = PostgresWriter(str(db_dsn) if db_dsn else None)
+    log = logging.getLogger(__name__)
+    if db_dsn and not db.enabled:
+        log.error(
+            "postgres_disabled — DSN set but writer off (install: pip install psycopg2-binary). "
+            "Candles/signals will NOT be written to DB."
+        )
+    elif not db_dsn:
+        log.warning("postgres_dsn empty — DB writes no-op")
+    else:
+        log.info("postgres_enabled dsn_host=%s", str(db_dsn).split("@")[-1] if "@" in str(db_dsn) else "set")
     telegram = _build_telegram(tg_cfg, chat_key="chat_id", thread_key="trade_thread_id")
     health_telegram = _build_telegram(
         tg_cfg,
@@ -220,7 +230,6 @@ def main(argv: list[str] | None = None) -> int:
             enabled=True,
             verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
         )
-    log = logging.getLogger(__name__)
     if not telegram.enabled:
         log.warning(
             "telegram_disabled — set paper_trading.telegram chat_id (+ optional trade_thread_id for topics)",
