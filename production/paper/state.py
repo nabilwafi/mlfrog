@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
@@ -32,6 +33,7 @@ class PortfolioState:
     equity: float
     peak_equity: float
     day: date | None = None
+    day_start_equity: float = 0.0
     day_pnl: float = 0.0
     heat_triggered_today: int = 0
     open_positions: dict[str, OpenPosition] = field(default_factory=dict)
@@ -42,11 +44,17 @@ class PortfolioState:
     trades_today: int = 0
     wins_today: int = 0
     pnl_today: float = 0.0
+    started_mono: float = field(default_factory=time.monotonic)
+
+    def __post_init__(self) -> None:
+        if self.day_start_equity <= 0:
+            self.day_start_equity = float(self.equity)
 
     def roll_day(self, now: datetime) -> None:
         d = now.date()
         if self.day != d:
             self.day = d
+            self.day_start_equity = float(self.equity)
             self.day_pnl = 0.0
             self.heat_triggered_today = 0
             self.meta_rejects = 0

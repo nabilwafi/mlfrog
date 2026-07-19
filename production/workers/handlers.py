@@ -28,7 +28,14 @@ def register_workers(
     db: PostgresWriter,
     telegram: TelegramNotifier,
     metrics: MetricsCollector,
+    health_telegram: TelegramNotifier | None = None,
+    daily_telegram: TelegramNotifier | None = None,
+    error_telegram: TelegramNotifier | None = None,
 ) -> None:
+    # Health / daily / error can use separate forum topics from trade notifications
+    health_tg = health_telegram if health_telegram is not None else telegram
+    daily_tg = daily_telegram if daily_telegram is not None else telegram
+    error_tg = error_telegram if error_telegram is not None else telegram
     def on_signal(ev: ProductionEvent) -> None:
         t0 = time.perf_counter()
         p = ev.payload
@@ -133,7 +140,9 @@ def register_workers(
             }
         )
         metrics.incr("execution_errors")
-        telegram.send(fmt_error({**p, "timestamp": ev.timestamp.isoformat()}))
+        t0 = time.perf_counter()
+        error_tg.send(fmt_error({**p, "timestamp": ev.timestamp.isoformat()}))
+        metrics.observe_ms("telegram_error_ms", (time.perf_counter() - t0) * 1000)
 
     def on_metric(ev: ProductionEvent) -> None:
         p = ev.payload
@@ -154,7 +163,9 @@ def register_workers(
     def on_daily(ev: ProductionEvent) -> None:
         p = dict(ev.payload)
         db.upsert_daily(p)
-        telegram.send(fmt_daily(p))
+        t0 = time.perf_counter()
+        daily_tg.send(fmt_daily(p))
+        metrics.observe_ms("telegram_daily_ms", (time.perf_counter() - t0) * 1000)
         metrics.incr("daily_reports")
 
     def on_heat(ev: ProductionEvent) -> None:
@@ -166,8 +177,8 @@ def register_workers(
         p.setdefault("timestamp", ev.timestamp.isoformat())
         db.insert_audit("health", str(p.get("reason", "ping")), p, correlation_id=ev.correlation_id)
         t0 = time.perf_counter()
-        telegram.send(fmt_health(p))
-        metrics.observe_ms("telegram_ms", (time.perf_counter() - t0) * 1000)
+        health_tg.send(fmt_health(p))
+        metrics.observe_ms("telegram_health_ms", (time.perf_counter() - t0) * 1000)
         metrics.incr("health_notified")
 
     def on_candle(ev: ProductionEvent) -> None:

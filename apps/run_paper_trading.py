@@ -38,10 +38,42 @@ from production.paper.broker import PaperBroker
 from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.runtime import IdleSignalSource, PaperRuntime, ReplaySignalSource
 from production.paper.state import PortfolioState
-from production.telegram.bot import TelegramNotifier
+from production.telegram.bot import TelegramNotifier, split_chat_and_thread
 from production.workers.handlers import register_workers
 from settings.paths import MT5_CONFIG, MT5_CONFIG_EXAMPLE, PAPER, ROOT
 from settings.strategy import STARTING_EQUITY
+
+
+def _trade_thread_id(tg_cfg: dict[str, Any]) -> Any:
+    """Prefer trade_thread_id; fall back to legacy message_thread_id."""
+    if tg_cfg.get("trade_thread_id") is not None:
+        return tg_cfg.get("trade_thread_id")
+    return tg_cfg.get("message_thread_id")
+
+
+def _build_telegram(tg_cfg: dict[str, Any], *, chat_key: str, thread_key: str) -> TelegramNotifier:
+    """Build notifier; supports forum topics via trade/health/daily thread ids."""
+    enabled = bool(tg_cfg.get("enabled", False))
+    token = tg_cfg.get("bot_token")
+    raw_chat = tg_cfg.get(chat_key)
+    # allow shorthand chat_id:thread in the chat field
+    chat_id, thread_from_chat = split_chat_and_thread(str(raw_chat) if raw_chat is not None else None)
+    if thread_key in {"trade_thread_id", "message_thread_id"}:
+        thread = _trade_thread_id(tg_cfg)
+    else:
+        thread = tg_cfg.get(thread_key)
+    if thread is None:
+        thread = thread_from_chat
+    # health/daily fall back to main chat_id if dedicated chat omitted
+    if chat_key != "chat_id" and not chat_id:
+        chat_id, _ = split_chat_and_thread(str(tg_cfg.get("chat_id") or "") or None)
+    return TelegramNotifier(
+        token,
+        chat_id,
+        message_thread_id=thread,
+        enabled=enabled and bool(chat_id),
+        verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+    )
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -129,18 +161,83 @@ def main(argv: list[str] | None = None) -> int:
     bus = EventBus(maxsize=int(paper_cfg.get("event_queue_size", 10_000)))
     metrics = MetricsCollector()
     db = PostgresWriter(str(db_dsn) if db_dsn else None)
-    telegram = TelegramNotifier(
-        tg_cfg.get("bot_token"),
-        tg_cfg.get("chat_id"),
-        enabled=bool(tg_cfg.get("enabled", False)),
-        verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+    telegram = _build_telegram(tg_cfg, chat_key="chat_id", thread_key="trade_thread_id")
+    health_telegram = _build_telegram(
+        tg_cfg,
+        chat_key="health_chat_id",
+        thread_key="health_message_thread_id",
     )
-    if not telegram.enabled:
-        logging.getLogger(__name__).warning(
-            "telegram_disabled — set paper_trading.telegram in %s (enabled/token/chat_id)",
-            Path(args.config),
+    daily_telegram = _build_telegram(
+        tg_cfg,
+        chat_key="daily_chat_id",
+        thread_key="daily_message_thread_id",
+    )
+    error_telegram = _build_telegram(
+        tg_cfg,
+        chat_key="error_chat_id",
+        thread_key="error_thread_id",
+    )
+    trade_thread = _trade_thread_id(tg_cfg)
+    # if dedicated chat missing, reuse trade chat + topic thread (or trade thread)
+    if not health_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
+        health_telegram = TelegramNotifier(
+            tg_cfg.get("bot_token"),
+            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
+            message_thread_id=tg_cfg.get("health_message_thread_id") or trade_thread,
+            enabled=True,
+            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
         )
-    register_workers(bus, db=db, telegram=telegram, metrics=metrics)
+    if not daily_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
+        daily_telegram = TelegramNotifier(
+            tg_cfg.get("bot_token"),
+            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
+            message_thread_id=tg_cfg.get("daily_message_thread_id") or trade_thread,
+            enabled=True,
+            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+        )
+    if not error_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
+        error_telegram = TelegramNotifier(
+            tg_cfg.get("bot_token"),
+            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
+            message_thread_id=tg_cfg.get("error_thread_id") or trade_thread,
+            enabled=True,
+            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+        )
+    log = logging.getLogger(__name__)
+    if not telegram.enabled:
+        log.warning(
+            "telegram_disabled — set paper_trading.telegram chat_id (+ optional trade_thread_id for topics)",
+        )
+    if not health_telegram.enabled:
+        log.warning(
+            "health_telegram_disabled — set health_chat_id / health_message_thread_id for HEALTHCHECK topic",
+        )
+    if not daily_telegram.enabled:
+        log.warning(
+            "daily_telegram_disabled — set daily_message_thread_id for DAILY REPORT topic",
+        )
+    if not error_telegram.enabled:
+        log.warning(
+            "error_telegram_disabled — set error_thread_id for EXECUTION ERROR topic",
+        )
+    else:
+        log.info(
+            "telegram_ready trades_chat=%s trade_thread=%s health_thread=%s daily_thread=%s error_thread=%s",
+            tg_cfg.get("chat_id"),
+            trade_thread,
+            tg_cfg.get("health_message_thread_id"),
+            tg_cfg.get("daily_message_thread_id"),
+            tg_cfg.get("error_thread_id"),
+        )
+    register_workers(
+        bus,
+        db=db,
+        telegram=telegram,
+        metrics=metrics,
+        health_telegram=health_telegram,
+        daily_telegram=daily_telegram,
+        error_telegram=error_telegram,
+    )
     bus.start(n_workers=bus_workers)
 
     if args.apply_schema and db.enabled:
@@ -149,7 +246,14 @@ def main(argv: list[str] | None = None) -> int:
         print("schema applied")
 
     state = PortfolioState(equity=starting, peak_equity=starting)
-    pipeline = ProductionPipeline(bus=bus, state=state, broker=PaperBroker(), symbol=str(cfg.get("symbol", "XAUUSD")))
+    env_name = str(paper_cfg.get("environment") or ("live" if args.mode == "live" else "paper"))
+    pipeline = ProductionPipeline(
+        bus=bus,
+        state=state,
+        broker=PaperBroker(),
+        symbol=str(cfg.get("symbol", "XAUUSD")),
+        environment=env_name,
+    )
     check_mt5 = bool(paper_cfg.get("check_mt5", True))
     health = HealthReporter(
         bus,
@@ -157,6 +261,7 @@ def main(argv: list[str] | None = None) -> int:
         interval_seconds=float(paper_cfg.get("health_interval_seconds", 300)),
         probe_throttle_seconds=float(paper_cfg.get("health_probe_throttle_seconds", 60)),
         mt5_probe=make_mt5_probe(cfg) if check_mt5 else None,
+        environment=env_name,
     )
     server = start_monitoring_server(
         host=mon_host, port=mon_port, metrics=metrics, state=state, bus=bus, health=health
