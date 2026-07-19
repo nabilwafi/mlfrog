@@ -481,6 +481,11 @@ paper_trading:
   health_interval_seconds: 300   # Telegram heartbeat; 0 = start/stop only
   health_probe_throttle_seconds: 60  # min gap when /health also notifies Telegram
   check_mt5: true                # include MT5 terminal/account in HEALTH (+ 503 if down)
+  live:
+    timeframe: H1
+    history_bars: 400
+    poll_seconds: 30            # how often to check for new closed H1 bar
+  frozen_models_dir: ./artifacts/models/frozen
   # postgres_dsn: "postgresql://user:pass@localhost:5432/xauusd"
   postgres_dsn: "postgresql://trading:trading@localhost:5432/trading"
   telegram:

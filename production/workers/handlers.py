@@ -170,6 +170,13 @@ def register_workers(
         metrics.observe_ms("telegram_ms", (time.perf_counter() - t0) * 1000)
         metrics.incr("health_notified")
 
+    def on_candle(ev: ProductionEvent) -> None:
+        t0 = time.perf_counter()
+        p = dict(ev.payload)
+        db.upsert_candle(p)
+        metrics.observe_ms("db_write_candle_ms", (time.perf_counter() - t0) * 1000)
+        metrics.incr("candles_written")
+
     bus.subscribe(EventType.SIGNAL, on_signal)
     bus.subscribe(EventType.TRADE_OPENED, on_opened)
     bus.subscribe(EventType.TRADE_CLOSED, on_closed)
@@ -180,3 +187,4 @@ def register_workers(
     bus.subscribe(EventType.DAILY_SUMMARY, on_daily)
     bus.subscribe(EventType.HEAT_TRIGGERED, on_heat)
     bus.subscribe(EventType.HEALTH, on_health)
+    bus.subscribe(EventType.CANDLE_CLOSED, on_candle)

@@ -45,11 +45,41 @@ class PaperRuntime:
             make_event(EventType.AUDIT, {"component": "runtime", "action": "start", "detail": {}})
         )
         last_day = None
+        if hasattr(self.source, "connect"):
+            self.source.connect()
         while not self._stop.is_set():
             try:
-                signals = self.source.next_signals()
-                for sig in signals:
-                    self.pipeline.process_signal(sig)
+                if hasattr(self.source, "poll"):
+                    tick = self.source.poll()
+                    if tick.bar is not None:
+                        b = tick.bar
+                        ts = b.timestamp if b.timestamp.tzinfo else b.timestamp.replace(tzinfo=timezone.utc)
+                        self.bus.publish(
+                            make_event(
+                                EventType.CANDLE_CLOSED,
+                                {
+                                    "symbol": b.symbol,
+                                    "timeframe": b.timeframe,
+                                    "timestamp": ts,
+                                    "open": b.open,
+                                    "high": b.high,
+                                    "low": b.low,
+                                    "close": b.close,
+                                    "tick_volume": b.tick_volume,
+                                    "spread": b.spread,
+                                    "real_volume": b.real_volume,
+                                    "source": "mt5_live",
+                                    "features": b.features,
+                                },
+                            )
+                        )
+                        self.pipeline.on_bar(high=b.high, low=b.low, close=b.close, timestamp=ts)
+                    for sig in tick.signals:
+                        self.pipeline.process_signal(sig)
+                else:
+                    signals = self.source.next_signals()
+                    for sig in signals:
+                        self.pipeline.process_signal(sig)
                 # daily summary once per UTC day rollover
                 today = datetime.now(timezone.utc).date()
                 if last_day is not None and today != last_day:
@@ -59,12 +89,14 @@ class PaperRuntime:
                 logger.exception("runtime_tick_failed")
                 self.bus.publish(
                     make_event(
-                        EventType.EXECUTION_ERROR,
-                        {"trade_id": None, "error_message": "runtime_tick_failed", "retry_count": 0},
+                        EventType.AUDIT,
+                        {"component": "runtime", "action": "tick_failed", "detail": {}},
                     )
                 )
             self._stop.wait(self.poll_seconds)
         self.pipeline.emit_daily_summary()
+        if hasattr(self.source, "disconnect"):
+            self.source.disconnect()
         self.bus.publish(
             make_event(EventType.AUDIT, {"component": "runtime", "action": "stop", "detail": {}})
         )

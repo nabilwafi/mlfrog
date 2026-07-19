@@ -131,3 +131,24 @@ CREATE TABLE IF NOT EXISTS trading.audit_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON trading.audit_logs (timestamp);
+
+-- Live / replay OHLCV for evaluation (Grafana: price series, feature drift)
+CREATE TABLE IF NOT EXISTS trading.candles (
+    symbol              TEXT NOT NULL,
+    timeframe           TEXT NOT NULL,
+    timestamp           TIMESTAMPTZ NOT NULL,
+    open                DOUBLE PRECISION NOT NULL,
+    high                DOUBLE PRECISION NOT NULL,
+    low                 DOUBLE PRECISION NOT NULL,
+    close               DOUBLE PRECISION NOT NULL,
+    tick_volume         DOUBLE PRECISION,
+    spread              DOUBLE PRECISION,
+    real_volume         DOUBLE PRECISION,
+    source              TEXT NOT NULL DEFAULT 'mt5_live',
+    features            JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (symbol, timeframe, timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS idx_candles_ts ON trading.candles (timestamp);
+CREATE INDEX IF NOT EXISTS idx_candles_symbol_tf ON trading.candles (symbol, timeframe);

@@ -6,6 +6,8 @@ import time
 import unittest
 from datetime import datetime, timezone
 
+import pandas as pd
+
 from production.events.bus import EventBus, MetricsCollector
 from production.events.types import EventType, make_event
 from production.paper.broker import PaperBroker
@@ -169,6 +171,102 @@ class HealthReporterTests(unittest.TestCase):
         time.sleep(0.2)
         bus.stop()
         self.assertTrue(any("mt5_down" in r for r in reasons))
+
+
+class LiveSourceTests(unittest.TestCase):
+    def test_poll_emits_once_per_bar(self) -> None:
+        from production.live.signal_source import LiveMT5SignalSource
+
+        ts = pd.Timestamp("2024-06-01 10:00:00", tz="UTC")
+        closed = pd.DataFrame(
+            [
+                {
+                    "timestamp": ts,
+                    "open": 2300.0,
+                    "high": 2305.0,
+                    "low": 2298.0,
+                    "close": 2302.0,
+                    "tick_volume": 100,
+                    "spread": 2,
+                    "real_volume": 0,
+                }
+            ]
+        )
+
+        class FakeFeed:
+            def connect(self) -> None:
+                pass
+
+            def disconnect(self) -> None:
+                pass
+
+            def latest_closed_bar(self, timeframe: str):
+                return closed
+
+            def fetch(self, timeframe: str, *, count: int):
+                return closed
+
+        class FakeInference:
+            def score_row(self, row, *, side: str, entry_price: float, atr: float):
+                from production.live.inference import ScoredSignal
+
+                return ScoredSignal(
+                    side=side,
+                    timestamp=ts,
+                    entry_price=entry_price,
+                    atr=atr,
+                    probability=0.5,
+                    meta_probability=0.55,
+                    confidence=55.0,
+                    session="london",
+                    regime="Sideways",
+                    bar_key=ts.isoformat() + ":" + side,
+                )
+
+        src = LiveMT5SignalSource({"timezone": "UTC"}, symbol="XAUUSD")
+        src._feed = FakeFeed()  # type: ignore[assignment]
+        src._features.build_panel = lambda **_: pd.DataFrame(  # type: ignore[method-assign]
+            [{"timestamp": ts, "atr_percent": 0.002, "session_london": 1.0, "d1_regime": "Sideways"}]
+        )
+        src._inference = FakeInference()  # type: ignore[assignment]
+
+        t1 = src.poll()
+        t2 = src.poll()
+        self.assertIsNotNone(t1.bar)
+        self.assertEqual(t1.bar.symbol, "XAUUSD")
+        self.assertEqual(len(t1.signals), 2)
+        self.assertEqual(len(t2.signals), 0)
+
+
+class CandleEventTests(unittest.TestCase):
+    def test_candle_closed_event(self) -> None:
+        bus = EventBus()
+        payloads: list[dict] = []
+        bus.subscribe(EventType.CANDLE_CLOSED, lambda e: payloads.append(dict(e.payload)))
+        bus.start(n_workers=1)
+        bus.publish(
+            make_event(
+                EventType.CANDLE_CLOSED,
+                {
+                    "symbol": "XAUUSD",
+                    "timeframe": "H1",
+                    "timestamp": datetime(2024, 6, 1, 10, tzinfo=timezone.utc),
+                    "open": 2300.0,
+                    "high": 2305.0,
+                    "low": 2298.0,
+                    "close": 2302.0,
+                    "tick_volume": 100.0,
+                    "spread": 2.0,
+                    "real_volume": 0.0,
+                    "source": "mt5_live",
+                    "features": {"atr_percent": 0.002},
+                },
+            )
+        )
+        time.sleep(0.2)
+        bus.stop()
+        self.assertEqual(payloads[0]["symbol"], "XAUUSD")
+        self.assertEqual(payloads[0]["features"]["atr_percent"], 0.002)
 
 
 if __name__ == "__main__":

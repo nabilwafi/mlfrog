@@ -31,7 +31,9 @@ from production.events.bus import EventBus, MetricsCollector
 from production.logging.structured import setup_json_logging
 from production.monitoring.health import HealthReporter
 from production.monitoring.mt5_probe import make_mt5_probe
+from production.monitoring.mt5_session import disconnect as mt5_disconnect
 from production.monitoring.server import start_monitoring_server
+from production.live.signal_source import LiveMT5SignalSource
 from production.paper.broker import PaperBroker
 from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.runtime import IdleSignalSource, PaperRuntime, ReplaySignalSource
@@ -102,7 +104,7 @@ def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[Incoming
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Production paper trading (Sprint 27)")
     p.add_argument("--config", type=Path, default=MT5_CONFIG)
-    p.add_argument("--mode", choices=("replay", "loop"), default="replay")
+    p.add_argument("--mode", choices=("replay", "loop", "live"), default="replay")
     p.add_argument("--max-signals", type=int, default=50)
     p.add_argument("--heat-trades", type=Path, default=None)
     p.add_argument("--apply-schema", action="store_true")
@@ -188,6 +190,23 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"replay done equity={state.equity:.2f} opened_keys={state.trades_today} skips={state.skips}")
             print(f"monitoring was on http://{mon_host}:{mon_port}/metrics")
+        elif args.mode == "live":
+            live_cfg = dict(paper_cfg.get("live") or {})
+            source = LiveMT5SignalSource(
+                cfg,
+                symbol=str(cfg.get("symbol", "XAUUSD")),
+                timeframe=str(live_cfg.get("timeframe", cfg.get("timeframe", "H1"))),
+                history_bars=int(live_cfg.get("history_bars", 400)),
+            )
+            runtime = PaperRuntime(
+                pipeline=pipeline,
+                bus=bus,
+                source=source,
+                poll_seconds=float(live_cfg.get("poll_seconds", poll)),
+            )
+            print(f"live paper trading on {cfg.get('symbol', 'XAUUSD')} — MT5 candles + frozen stack + paper fills")
+            print(f"monitoring http://{mon_host}:{mon_port}/health")
+            runtime.run_forever()
         else:
             runtime = PaperRuntime(
                 pipeline=pipeline,
@@ -202,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         time.sleep(0.3)
         bus.stop()
         server.shutdown()
+        mt5_disconnect()
     return 0
 
 

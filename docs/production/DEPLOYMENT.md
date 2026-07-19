@@ -85,6 +85,8 @@ Suggested panels:
 | Latency | `trading.metrics` where `name LIKE '%latency%'` |
 | Heat | `heat_triggered` daily |
 | Spread / slippage | `execution_logs` |
+| Live candles | `SELECT timestamp, close FROM trading.candles WHERE symbol='XAUUSD' ORDER BY timestamp` |
+| Feature drift | `features->>'atr_percent'` etc. on `trading.candles` |
 
 ## Production checklist
 
