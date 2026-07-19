@@ -153,6 +153,17 @@ def _fmt_price(v: Any) -> str:
         return str(v if v is not None else "n/a")
 
 
+def _fmt_trade_id(p: dict[str, Any]) -> str:
+    """Compact display id from trade_id / signal_id hex."""
+    raw = str(p.get("trade_id") or p.get("signal_id") or "").replace("-", "").strip()
+    if not raw:
+        return "n/a"
+    try:
+        return f"#{int(raw[-4:], 16)}"
+    except ValueError:
+        return f"#{raw[:8]}"
+
+
 def _fmt_risk_pct(v: Any) -> str:
     try:
         x = float(v)
@@ -161,7 +172,7 @@ def _fmt_risk_pct(v: Any) -> str:
     # accept 0.01 or 1.0 meaning 1%
     if 0 < x <= 1:
         x *= 100.0
-    return f"{x:.0f}%"
+    return f"{x:.1f}%"
 
 
 def _fmt_confidence(v: Any) -> str:
@@ -204,15 +215,15 @@ def _fmt_duration(seconds: Any) -> str:
     return f"{sec}s"
 
 
-def _fmt_money(v: Any) -> str:
+def _fmt_money_dollar(v: Any) -> str:
     try:
         x = float(v)
     except (TypeError, ValueError):
         return "n/a"
-    sign = "+" if x >= 0 else ""
-    # trim trailing .0 for whole dollars
-    body = f"{x:.0f}" if abs(x - round(x)) < 1e-9 else f"{x:.2f}"
-    return f"{sign}{body}$"
+    sign = "+" if x >= 0 else "-"
+    ax = abs(x)
+    body = f"{ax:.0f}" if abs(ax - round(ax)) < 1e-9 else f"{ax:.2f}"
+    return f"{sign}${body}"
 
 
 def _fmt_r(v: Any) -> str:
@@ -224,12 +235,24 @@ def _fmt_r(v: Any) -> str:
     return f"{sign}{x:.1f}R"
 
 
+def _fmt_closed_pnl(p: dict[str, Any]) -> str:
+    r = _fmt_r(p.get("pnl_r"))
+    money = _fmt_money_dollar(p.get("pnl"))
+    if r == "n/a" and money == "n/a":
+        return "n/a"
+    if money == "n/a":
+        return r
+    if r == "n/a":
+        return f"({money})"
+    return f"{r} ({money})"
+
+
 def _exit_result(reason: Any) -> str:
     r = str(reason or "").upper()
     if r == "TP":
-        return "TP HIT"
+        return "TP ✅"
     if r == "SL":
-        return "SL HIT"
+        return "SL ❌"
     return r or "n/a"
 
 
@@ -258,53 +281,55 @@ def _skip_value_label(p: dict[str, Any]) -> str:
     return str(val)
 
 
-def _skip_threshold_label(p: dict[str, Any]) -> str:
+def _skip_required_label(p: dict[str, Any]) -> str:
     reason = str(p.get("reason") or "").lower()
     thr = p.get("threshold")
     if thr is None:
         return "n/a"
     if reason == "confidence":
-        return _fmt_confidence(thr)
+        return f"≥{_fmt_confidence(thr)}"
     if reason == "meta":
         try:
-            return f"{float(thr):.2f}"
+            return f"≥{float(thr):.2f}"
         except (TypeError, ValueError):
-            return str(thr)
-    return str(thr)
+            return f"≥{thr}"
+    if reason == "heat":
+        return f"≥{thr}R"
+    return f"≥{thr}"
 
 
 def fmt_new_trade(p: dict[str, Any]) -> str:
     return (
         "🟢 <b>NEW TRADE</b>\n\n"
-        f"Environment:\n{_env(p)}\n\n"
-        f"Side:\n{_side_label(p.get('side'))}\n\n"
-        f"Entry:\n{_fmt_price(p.get('entry_price'))}\n\n"
-        f"SL:\n{_fmt_price(p.get('stop_loss'))}\n\n"
-        f"TP:\n{_fmt_price(p.get('take_profit'))}\n\n"
-        f"Risk:\n{_fmt_risk_pct(p.get('risk_pct'))}\n\n"
-        f"Confidence:\n{_fmt_confidence(p.get('confidence'))}\n\n"
-        f"Time:\n{_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}"
+        f"Trade ID : {_fmt_trade_id(p)}\n"
+        f"Side     : {_side_label(p.get('side'))}\n\n"
+        f"Entry    : {_fmt_price(p.get('entry_price'))}\n"
+        f"SL / TP  : {_fmt_price(p.get('stop_loss'))} / {_fmt_price(p.get('take_profit'))}\n\n"
+        f"Risk     : {_fmt_risk_pct(p.get('risk_pct'))}\n"
+        f"Confidence : {_fmt_confidence(p.get('confidence'))}\n\n"
+        f"Time     : {_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}"
     )
 
 
 def fmt_trade_closed(p: dict[str, Any]) -> str:
     return (
         "🔴 <b>TRADE CLOSED</b>\n\n"
-        f"Environment:\n{_env(p)}\n\n"
-        f"Result:\n{_exit_result(p.get('exit_reason'))}\n\n"
-        f"PnL:\n{_fmt_money(p.get('pnl'))}\n\n"
-        f"R:\n{_fmt_r(p.get('pnl_r'))}\n\n"
-        f"Duration:\n{_fmt_duration(p.get('duration_seconds'))}"
+        f"Trade ID : {_fmt_trade_id(p)}\n\n"
+        f"Result   : {_exit_result(p.get('exit_reason'))}\n"
+        f"PnL      : {_fmt_closed_pnl(p)}\n\n"
+        f"Duration : {_fmt_duration(p.get('duration_seconds'))}\n\n"
+        f"Time     : {_fmt_utc_time(p.get('exit_time') or p.get('timestamp'))}"
     )
 
 
 def fmt_skipped(p: dict[str, Any]) -> str:
     return (
-        "⏭ <b>TRADE SKIPPED</b>\n\n"
-        f"Environment:\n{_env(p)}\n\n"
-        f"Reason:\n{_skip_reason_label(p.get('reason'))}\n\n"
-        f"Value:\n{_skip_value_label(p)}\n\n"
-        f"Threshold:\n{_skip_threshold_label(p)}"
+        "⏭️ <b>TRADE SKIPPED</b>\n\n"
+        f"Price    : {_fmt_price(p.get('entry_price') or p.get('price'))}\n\n"
+        f"Reason   : {_skip_reason_label(p.get('reason'))}\n"
+        f"Value    : {_skip_value_label(p)}\n"
+        f"Required : {_skip_required_label(p)}\n\n"
+        f"Time     : {_fmt_utc_time(p.get('timestamp') or p.get('entry_time'))}"
     )
 
 

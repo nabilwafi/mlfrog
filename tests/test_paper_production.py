@@ -136,55 +136,59 @@ class TelegramFmtTests(unittest.TestCase):
     def test_fmt_new_trade(self) -> None:
         text = fmt_new_trade(
             {
-                "environment": "live",
+                "trade_id": "00000000000000000000000000000400",
                 "side": "long",
                 "entry_price": 3345.5,
-                "stop_loss": 3335.0,
-                "take_profit": 3365.0,
+                "stop_loss": 3338.0,
+                "take_profit": 3360.0,
                 "risk_pct": 0.01,
-                "confidence": 78,
+                "confidence": 82,
                 "entry_time": datetime(2026, 7, 19, 15, 30, tzinfo=timezone.utc),
             }
         )
         self.assertIn("NEW TRADE", text)
-        self.assertIn("Environment:\nLIVE", text)
-        self.assertIn("Side:\nBUY", text)
-        self.assertIn("Entry:\n3345.50", text)
-        self.assertIn("SL:\n3335.00", text)
-        self.assertIn("TP:\n3365.00", text)
-        self.assertIn("Risk:\n1%", text)
-        self.assertIn("Confidence:\n78%", text)
-        self.assertIn("Time:\n15:30 UTC", text)
+        self.assertIn("Trade ID : #1024", text)
+        self.assertIn("Side     : BUY", text)
+        self.assertIn("Entry    : 3345.50", text)
+        self.assertIn("SL / TP  : 3338.00 / 3360.00", text)
+        self.assertIn("Risk     : 1.0%", text)
+        self.assertIn("Confidence : 82%", text)
+        self.assertIn("Time     : 15:30 UTC", text)
 
     def test_fmt_trade_closed(self) -> None:
         text = fmt_trade_closed(
             {
-                "environment": "live",
+                "trade_id": "00000000000000000000000000000400",
                 "exit_reason": "TP",
-                "pnl": 120,
+                "pnl": 125,
                 "pnl_r": 2.5,
-                "duration_seconds": 3 * 3600 + 20 * 60,
+                "duration_seconds": 2 * 3600 + 14 * 60,
+                "exit_time": datetime(2026, 7, 19, 17, 44, tzinfo=timezone.utc),
             }
         )
         self.assertIn("TRADE CLOSED", text)
-        self.assertIn("Result:\nTP HIT", text)
-        self.assertIn("PnL:\n+120$", text)
-        self.assertIn("R:\n+2.5R", text)
-        self.assertIn("Duration:\n3h 20m", text)
+        self.assertIn("Trade ID : #1024", text)
+        self.assertIn("Result   : TP ✅", text)
+        self.assertIn("PnL      : +2.5R (+$125)", text)
+        self.assertIn("Duration : 2h 14m", text)
+        self.assertIn("Time     : 17:44 UTC", text)
 
     def test_fmt_skipped(self) -> None:
         text = fmt_skipped(
             {
-                "environment": "live",
+                "entry_price": 3348.25,
                 "reason": "confidence",
-                "current_value": 62,
+                "current_value": 68,
                 "threshold": 70,
+                "timestamp": datetime(2026, 7, 19, 15, 20, tzinfo=timezone.utc),
             }
         )
         self.assertIn("TRADE SKIPPED", text)
-        self.assertIn("Reason:\nConfidence", text)
-        self.assertIn("Value:\n62%", text)
-        self.assertIn("Threshold:\n70%", text)
+        self.assertIn("Price    : 3348.25", text)
+        self.assertIn("Reason   : Confidence", text)
+        self.assertIn("Value    : 68%", text)
+        self.assertIn("Required : ≥70%", text)
+        self.assertIn("Time     : 15:20 UTC", text)
 
     def test_fmt_health(self) -> None:
         text = fmt_health(
