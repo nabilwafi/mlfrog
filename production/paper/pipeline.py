@@ -375,6 +375,8 @@ class ProductionPipeline:
                     "reason": reason,
                     "threshold": threshold,
                     "current_value": current,
+                    "entry_price": float(sig.entry_price),
+                    "timestamp": sig.timestamp,
                     "environment": self.environment,
                     "detail": {
                         "meta_probability": sig.meta_probability,
