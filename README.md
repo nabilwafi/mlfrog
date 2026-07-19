@@ -397,7 +397,8 @@ python apps/run_paper_trading.py --mode loop
 ```
 
 Schema: `sql/production_schema.sql`  
-Monitoring: `http://127.0.0.1:8787/health` · `/metrics` · `/portfolio`
+Monitoring: `http://<LAN-IP>:8787/health` · `/metrics` · `/portfolio`  
+(`paper_trading.monitoring_host: 0.0.0.0` — use `127.0.0.1` for local-only)
 
 ```bash
 python -m unittest tests.test_paper_production -v

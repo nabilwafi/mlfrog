@@ -489,7 +489,7 @@ paper_trading:
   poll_seconds: 5
   event_workers: 2
   event_queue_size: 10000
-  monitoring_host: 127.0.0.1
+  monitoring_host: 0.0.0.0  # LAN-accessible; use 127.0.0.1 for local-only
   monitoring_port: 8787
   health_interval_seconds: 300   # Telegram heartbeat; 0 = start/stop only
   health_probe_throttle_seconds: 60  # min gap when /health also notifies Telegram

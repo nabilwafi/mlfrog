@@ -91,6 +91,23 @@ def _resolve(path: str) -> Path:
     return p if p.is_absolute() else (ROOT / p).resolve()
 
 
+def _lan_ip() -> str:
+    # ponytail: UDP connect trick — no packets sent; fails closed to 127.0.0.1
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+
+
+def _monitoring_url(host: str, port: int) -> str:
+    display = _lan_ip() if host in ("0.0.0.0", "::") else host
+    return f"http://{display}:{port}"
+
+
 def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[IncomingSignal]:
     import pandas as pd
 
@@ -294,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
             )
             print(f"replay done equity={state.equity:.2f} opened_keys={state.trades_today} skips={state.skips}")
-            print(f"monitoring was on http://{mon_host}:{mon_port}/metrics")
+            print(f"monitoring was on {_monitoring_url(mon_host, mon_port)}/metrics")
         elif args.mode == "live":
             live_cfg = dict(paper_cfg.get("live") or {})
             source = LiveMT5SignalSource(
@@ -310,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_seconds=float(live_cfg.get("poll_seconds", poll)),
             )
             print(f"live paper trading on {cfg.get('symbol', 'XAUUSD')} — MT5 candles + frozen stack + paper fills")
-            print(f"monitoring http://{mon_host}:{mon_port}/health")
+            print(f"monitoring {_monitoring_url(mon_host, mon_port)}/health")
             runtime.run_forever()
         else:
             runtime = PaperRuntime(
@@ -319,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                 source=IdleSignalSource(),
                 poll_seconds=poll,
             )
-            print(f"paper loop listening; monitoring http://{mon_host}:{mon_port}/health")
+            print(f"paper loop listening; monitoring {_monitoring_url(mon_host, mon_port)}/health")
             runtime.run_forever()
     finally:
         health.stop()

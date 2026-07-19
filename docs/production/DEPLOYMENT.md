@@ -19,7 +19,7 @@ paper_trading:
   poll_seconds: 5
   event_workers: 2
   event_queue_size: 10000
-  monitoring_host: 127.0.0.1
+  monitoring_host: 0.0.0.0  # LAN-accessible; 127.0.0.1 = local-only
   monitoring_port: 8787
   postgres_dsn: "postgresql://user:pass@localhost:5432/xauusd"
   telegram:
