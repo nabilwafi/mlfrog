@@ -22,6 +22,7 @@ class EventType(str, Enum):
     TRADE_OPENED = "trade_opened"
     TRADE_CLOSED = "trade_closed"
     TRADE_SKIPPED = "trade_skipped"
+    TRAIL_UPDATE = "trail_update"
     EXECUTION_ERROR = "execution_error"
     HEAT_TRIGGERED = "heat_triggered"
     METRIC = "metric"

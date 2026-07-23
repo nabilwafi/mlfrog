@@ -12,7 +12,9 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from production import PRIMARY_TOP_PCT
 from production.live.primary_export import ensure_frozen_primary
+from production.paper.market_state import infer_market_state
 from research.confidence_layer.services.confidence import attach_components
 from research.meta_model import FINAL_FEATURES
 from research.model_v2.services.experiment_catalog import LONG_STRUCTURE_CONTEXT, SHORT_STRUCTURE_CONTEXT
@@ -33,6 +35,10 @@ class ScoredSignal:
     session: str
     regime: str
     bar_key: str
+    trend: str = "unknown"
+    volatility: str = "unknown"
+    momentum: str = "unknown"
+    structure: str = "unknown"
 
 
 class FrozenStackInference:
@@ -56,7 +62,9 @@ class FrozenStackInference:
         self._primary: dict[str, lgb.Booster] = {}
         self._primary_features: dict[str, list[str]] = {}
         self._prob_history: dict[str, deque[float]] = {"long": deque(maxlen=500), "short": deque(maxlen=500)}
-        self._percentile = float(mm.get("percentile", 0.03))
+        # Prefer production policy top-pct; allow cfg.production.primary_top_pct override.
+        prod_cfg = dict(cfg.get("production") or {})
+        self._percentile = float(prod_cfg.get("primary_top_pct", PRIMARY_TOP_PCT))
 
     def _load_primary(self, side: str) -> lgb.Booster:
         side = side.lower()
@@ -135,6 +143,7 @@ class FrozenStackInference:
         ts = pd.Timestamp(row["timestamp"])
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
+        ms = infer_market_state(row)
         return ScoredSignal(
             side=side_l,
             timestamp=ts,
@@ -143,7 +152,11 @@ class FrozenStackInference:
             probability=raw_prob,
             meta_probability=meta_prob,
             confidence=conf,
-            session=self._session_label(row),
-            regime=str(row.get("d1_regime", "unknown") or "unknown"),
+            session=ms.session if ms.session != "unknown" else self._session_label(row),
+            regime=ms.regime_raw,
+            trend=ms.trend,
+            volatility=ms.volatility,
+            momentum=ms.momentum,
+            structure=ms.structure,
             bar_key=ts.isoformat() + ":" + side_l,
         )

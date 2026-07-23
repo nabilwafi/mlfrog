@@ -16,6 +16,7 @@ from production.telegram.bot import (
     fmt_health,
     fmt_new_trade,
     fmt_skipped,
+    fmt_trail_update,
     fmt_trade_closed,
 )
 
@@ -106,6 +107,12 @@ def register_workers(
         metrics.incr("trades_closed")
         telegram.send(fmt_trade_closed(p))
 
+    def on_trail_update(ev: ProductionEvent) -> None:
+        p = dict(ev.payload)
+        p["correlation_id"] = ev.correlation_id
+        metrics.incr("trail_updates")
+        telegram.send(fmt_trail_update(p))
+
     def on_skipped(ev: ProductionEvent) -> None:
         p = ev.payload
         db.insert_skip(
@@ -191,6 +198,7 @@ def register_workers(
     bus.subscribe(EventType.SIGNAL, on_signal)
     bus.subscribe(EventType.TRADE_OPENED, on_opened)
     bus.subscribe(EventType.TRADE_CLOSED, on_closed)
+    bus.subscribe(EventType.TRAIL_UPDATE, on_trail_update)
     bus.subscribe(EventType.TRADE_SKIPPED, on_skipped)
     bus.subscribe(EventType.EXECUTION_ERROR, on_error)
     bus.subscribe(EventType.METRIC, on_metric)

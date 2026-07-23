@@ -118,7 +118,9 @@ class LiveMT5SignalSource:
                 feat_row.iloc[0]["timestamp"],
             )
         feat_row = feat_row.iloc[0]
-        atr = float(feat_row.get("atr_percent", 0.01) or 0.01) * float(row["close"])
+        # atr_percent = (ATR/close)*100 from VolatilityBuilder — convert back to price ATR
+        atr_pct = float(feat_row.get("atr_percent", 0.1) or 0.1)
+        atr = atr_pct / 100.0 * float(row["close"])
         if not pd.notna(atr) or atr <= 0:
             atr = float(row["close"]) * 0.001
 
@@ -137,6 +139,15 @@ class LiveMT5SignalSource:
             if scored is None:
                 continue
             signals.append(_to_incoming(scored, symbol=self._symbol))
+
+        # One side per bar: keep highest meta (then primary prob)
+        if len(signals) > 1:
+            signals = [
+                max(
+                    signals,
+                    key=lambda s: (float(s.meta_probability), float(s.probability)),
+                )
+            ]
 
         bar = ClosedBar(
             symbol=self._symbol,
@@ -175,6 +186,10 @@ def _to_incoming(scored: ScoredSignal, *, symbol: str) -> IncomingSignal:
         atr=scored.atr,
         session=scored.session,
         regime=scored.regime,
+        trend=scored.trend,
+        volatility=scored.volatility,
+        momentum=scored.momentum,
+        structure=scored.structure,
         bar_key=scored.bar_key,
     )
 
