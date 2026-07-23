@@ -1,8 +1,7 @@
 """Sprint 27 — Production paper trading policy knobs.
 
 Locked exit-engine: Primary top 5% + ATR trail 0.12 + max_open 1.
-Session gate OFF (all UTC hours). Prior 09-15 filter was quality-biased;
-all-session keeps higher density with still-acceptable PF/DD.
+Session gate OFF (all UTC hours). Finex-style fixed lot 0.01.
 """
 
 from __future__ import annotations
@@ -30,8 +29,10 @@ RISK_PCT: float = 0.01
 RISK_BASE: float = 0.01
 DAILY_LOSS_STOP_R: float = 1.0
 
-# --- Sizing: primary proba as edge (matches exit-engine backtest) ---
-SIZE_FROM_PRIMARY: bool = True
+# --- Sizing: Finex-style fixed lot (paper/live micro) ---
+SIZE_FROM_PRIMARY: bool = True  # still used for logging edge / expected_r
+SIZE_MODE: str = "fixed"  # fixed | risk
+FIXED_LOT: float = 0.01
 EXPECTED_R_REF: float = 0.25
 RISK_MIN: float = 0.0025
 RISK_MAX: float = 0.015
@@ -46,4 +47,4 @@ MODEL_VERSION: str = "primary_v3_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "sprint19_18feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5"
+PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5_fixed001"

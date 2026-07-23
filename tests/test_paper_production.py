@@ -57,8 +57,8 @@ class BusTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
-    def test_low_primary_still_opens_with_min_risk(self) -> None:
-        """Sizing from primary: low proba → RISK_MIN; still opens (not a skip gate)."""
+    def test_low_primary_still_opens_with_fixed_lot(self) -> None:
+        """Fixed 0.01 lot: low primary still opens (not a skip gate)."""
         bus = EventBus()
         metrics = MetricsCollector()
         register_workers(bus, db=PostgresWriter(None), telegram=TelegramNotifier(None, None), metrics=metrics)
@@ -79,9 +79,9 @@ class PipelineTests(unittest.TestCase):
         out = pipe.process_signal(sig)
         self.assertEqual(out["status"], "opened")
         pos = state.open_positions[out["trade_id"]]
-        from production import RISK_MIN
+        from production import FIXED_LOT
 
-        self.assertAlmostEqual(pos.risk_pct, RISK_MIN, places=6)
+        self.assertAlmostEqual(pos.lot, FIXED_LOT, places=6)
         time.sleep(0.15)
         bus.stop()
 
@@ -128,7 +128,9 @@ class PipelineTests(unittest.TestCase):
         tid = out["trade_id"]
         self.assertIn(tid, state.open_positions)
         pos = state.open_positions[tid]
-        self.assertNotAlmostEqual(pos.risk_pct, 0.01, places=5)  # edge-sized, not flat 1%
+        from production import FIXED_LOT
+
+        self.assertAlmostEqual(pos.lot, FIXED_LOT, places=6)
         # hit TP
         closed = pipe.on_bar(high=2010, low=1999, close=2005, timestamp=datetime(2024, 1, 2, 12, tzinfo=timezone.utc))
         self.assertTrue(len(closed) >= 1)
@@ -431,23 +433,31 @@ class TelegramFmtTests(unittest.TestCase):
         text = fmt_daily(
             {
                 "date": "2026-07-19",
+                "symbol": "XAUUSD",
                 "status": "ok",
+                "balance": 80.0,
+                "equity": 82.35,
                 "trades": 5,
                 "wins": 3,
                 "losses": 2,
-                "skipped": 7,
-                "pnl_pct": 2.35,
-                "uptime_seconds": 24 * 3600,
+                "winrate": 0.6,
+                "pnl": 2.35,
+                "pnl_pct": 2.94,
+                "best_trade_pnl": 1.5,
+                "worst_trade_pnl": -0.8,
             }
         )
-        self.assertIn("DAILY REPORT", text)
-        self.assertIn("19 Jul 2026", text)
-        self.assertIn("🟢 OK", text)
-        self.assertIn("Trades:\n5", text)
-        self.assertIn("Win/Loss:\n3/2", text)
-        self.assertIn("Skip:\n7", text)
-        self.assertIn("+2.35%", text)
-        self.assertIn("Uptime:\n24h", text)
+        self.assertIn("XAUUSD DAILY", text)
+        self.assertIn("Balance: $80.00", text)
+        self.assertIn("Equity: $82.35", text)
+        self.assertIn("PnL: +$2.35", text)
+        self.assertIn("Trades: 5", text)
+        self.assertIn("W: 3", text)
+        self.assertIn("L: 2", text)
+        self.assertIn("WR: 60%", text)
+        self.assertIn("Best: +$1.50", text)
+        self.assertIn("Worst: -$0.80", text)
+        self.assertIn("Online", text)
 
 
 class HealthReporterTests(unittest.TestCase):

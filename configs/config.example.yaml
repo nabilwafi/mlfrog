@@ -484,7 +484,7 @@ temporal_stability:
 
 # Paper trading runtime - Sprint 27 (infra only; research frozen)
 paper_trading:
-  starting_equity: 10000
+  starting_equity: 80
   environment: paper             # shown in HEALTHCHECK (paper | live | staging ...)
   poll_seconds: 5
   event_workers: 2

@@ -543,28 +543,54 @@ def _fmt_pnl_pct(p: dict[str, Any]) -> str:
 def fmt_daily(p: dict[str, Any]) -> str:
     status = str(p.get("status", "ok")).lower()
     if status == "ok":
-        status_line = "🟢 OK"
+        bot_status = "🟢 Online"
     elif status == "degraded":
-        status_line = "🟡 DEGRADED"
+        bot_status = "🟡 Degraded"
     else:
-        status_line = "🔴 DOWN"
+        bot_status = "🔴 Down"
 
     trades = int(p.get("trades") or 0)
     wins = int(p.get("wins") or 0)
     losses = p.get("losses")
     if losses is None:
         losses = max(0, trades - wins)
-    skips = int(p.get("skipped") or 0)
+    wr = p.get("winrate")
+    if wr is None:
+        wr = (wins / trades) if trades else 0.0
+    try:
+        wr_pct = float(wr) * 100.0 if float(wr) <= 1.0 else float(wr)
+    except (TypeError, ValueError):
+        wr_pct = 0.0
 
+    balance = p.get("balance", p.get("day_start_equity", p.get("equity")))
+    equity = p.get("equity")
+    pnl = p.get("pnl")
+    pnl_pct = _fmt_pnl_pct(p)
+    best = p.get("best_trade_pnl")
+    worst = p.get("worst_trade_pnl")
+
+    def _money(v: Any, *, signed: bool = False) -> str:
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return "n/a"
+        if signed:
+            sign = "+" if x >= 0 else "-"
+            return f"{sign}${abs(x):.2f}"
+        return f"${x:.2f}"
+
+    symbol = _symbol(p)
     return (
-        "📊 <b>DAILY REPORT</b>\n\n"
-        f"📅 {_fmt_daily_date(p.get('date'))}\n\n"
-        f"Status:\n{status_line}\n\n"
-        f"Trades:\n{trades}\n\n"
-        f"Win/Loss:\n{wins}/{int(losses)}\n\n"
-        f"Skip:\n{skips}\n\n"
-        f"PnL:\n{_fmt_pnl_pct(p)}\n\n"
-        f"Uptime:\n{_fmt_daily_uptime(p)}"
+        f"🟡 <b>{symbol} DAILY</b>\n\n"
+        f"💰 Balance: {_money(balance)}\n"
+        f"📈 Equity: {_money(equity)}\n"
+        f"💵 PnL: {_money(pnl, signed=True)} ({pnl_pct})\n\n"
+        f"📊 Trades: {trades}\n"
+        f"✅ W: {wins} | ❌ L: {int(losses)}\n"
+        f"🎯 WR: {wr_pct:.0f}%\n\n"
+        f"🔥 Best: {_money(best, signed=True) if best is not None else 'n/a'}\n"
+        f"💀 Worst: {_money(worst, signed=True) if worst is not None else 'n/a'}\n\n"
+        f"🤖 Status: {bot_status}"
     )
 
 
