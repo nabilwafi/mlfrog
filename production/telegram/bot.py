@@ -247,15 +247,6 @@ def _fmt_closed_pnl(p: dict[str, Any]) -> str:
     return f"{r} ({money})"
 
 
-def _exit_result(reason: Any) -> str:
-    r = str(reason or "").upper()
-    if r == "TP":
-        return "TP ✅"
-    if r == "SL":
-        return "SL ❌"
-    return r or "n/a"
-
-
 def _skip_reason_label(reason: Any) -> str:
     r = str(reason or "unknown")
     return r.replace("_", " ").strip().title()
@@ -298,27 +289,186 @@ def _skip_required_label(p: dict[str, Any]) -> str:
     return f"≥{thr}"
 
 
-def fmt_new_trade(p: dict[str, Any]) -> str:
+def _symbol(p: dict[str, Any]) -> str:
+    return str(p.get("symbol") or "XAUUSD").upper()
+
+
+def _lot(p: dict[str, Any]) -> str:
+    try:
+        return f"{float(p.get('lot')):.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _primary_pct(p: dict[str, Any]) -> str:
+    raw = p.get("probability")
+    if raw is None:
+        raw = p.get("edge_score")
+    if raw is None:
+        return "n/a"
+    try:
+        x = float(raw)
+    except (TypeError, ValueError):
+        return "n/a"
+    if x <= 1.0:
+        x *= 100.0
+    return f"{x:.1f}%"
+
+
+def _signed_pips(side: Any, entry: Any, price: Any) -> str:
+    try:
+        e, px = float(entry), float(price)
+        raw = (px - e) / 0.1 if str(side).lower() in {"long", "buy"} else (e - px) / 0.1
+    except (TypeError, ValueError):
+        return "n/a"
+    sign = "+" if raw >= 0 else ""
+    return f"{sign}{raw:.0f}"
+
+
+def _label_map(value: Any, mapping: dict[str, str], *, fallback: str = "n/a") -> str:
+    key = str(value or "").strip().lower()
+    if not key or key == "unknown":
+        return fallback
+    return mapping.get(key, str(value).replace("_", " ").title())
+
+
+def _market_headline(p: dict[str, Any]) -> str:
+    trend = str(p.get("trend") or "").lower()
+    structure = str(p.get("structure") or "").lower()
+    if structure == "trend" and trend == "bull":
+        return "🟢 TRENDING BULLISH"
+    if structure == "trend" and trend == "bear":
+        return "🔴 TRENDING BEARISH"
+    if structure in {"range", "sideways"} or trend == "sideways":
+        return "🟡 RANGE / SIDEWAYS"
+    if structure == "compression":
+        return "🟠 COMPRESSION"
+    regime = str(p.get("regime") or "").strip()
+    if regime and regime.lower() != "unknown":
+        return f"⚪ {regime.replace('_', ' ').title()}"
+    return "⚪ UNKNOWN"
+
+
+def _market_block(p: dict[str, Any]) -> str:
+    trend = _label_map(p.get("trend"), {"bull": "Bullish", "bear": "Bearish", "sideways": "Sideways"})
+    vol = _label_map(p.get("volatility"), {"high": "High", "medium": "Medium", "low": "Low"})
+    mom = _label_map(p.get("momentum"), {"strong": "Strong", "normal": "Normal", "weak": "Weak"})
+    sess = _label_map(
+        p.get("session"),
+        {
+            "london": "London",
+            "newyork": "New York",
+            "asia": "Asia",
+            "overlap": "London/NY Overlap",
+            "other": "Other",
+        },
+    )
     return (
-        "🟢 <b>NEW TRADE</b>\n\n"
-        f"Trade ID : {_fmt_trade_id(p)}\n"
-        f"Side     : {_side_label(p.get('side'))}\n\n"
-        f"Entry    : {_fmt_price(p.get('entry_price'))}\n"
-        f"SL / TP  : {_fmt_price(p.get('stop_loss'))} / {_fmt_price(p.get('take_profit'))}\n\n"
-        f"Risk     : {_fmt_risk_pct(p.get('risk_pct'))}\n"
-        f"Confidence : {_fmt_confidence(p.get('confidence'))}\n\n"
-        f"Time     : {_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}"
+        "━━━━━━━━━━━━━━\n"
+        "📊 Market Context\n"
+        f"{_market_headline(p)}\n\n"
+        f"📈 Trend   : {trend}\n"
+        f"🔥 Vol     : {vol}\n"
+        f"⚡ Momentum: {mom}\n"
+        f"📉 Session : {sess}"
+    )
+
+
+def _trail_policy_line(p: dict[str, Any]) -> str:
+    try:
+        mult = float(p.get("trail_atr_mult"))
+    except (TypeError, ValueError):
+        mult = None
+    try:
+        act = float(p.get("trail_activate_r"))
+    except (TypeError, ValueError):
+        act = None
+    if mult is None:
+        return "🔄 Exit  : ATR Trail"
+    if act is None:
+        return f"🔄 Exit  : ATR Trail {mult:.2f}"
+    return f"🔄 Exit  : ATR Trail {mult:.2f} (after +{act:g}R)"
+
+
+def fmt_new_trade(p: dict[str, Any]) -> str:
+    side = _side_label(p.get("side"))
+    side_emoji = "📈" if side == "BUY" else "📉"
+    return (
+        "🟢 <b>OPEN POSITION</b>\n\n"
+        f"🟢 {_symbol(p)} | TRADE OPEN\n\n"
+        f"{side_emoji} {side}\n\n"
+        f"💰 Entry : {_fmt_price(p.get('entry_price'))}\n"
+        f"🛑 SL    : {_fmt_price(p.get('stop_loss'))}\n"
+        f"{_trail_policy_line(p)}\n"
+        f"📌 TP ref: {_fmt_price(p.get('take_profit'))}\n\n"
+        f"📦 Lot   : {_lot(p)}\n"
+        f"⚖️ Risk  : {_fmt_risk_pct(p.get('risk_pct'))}\n"
+        f"📊 Primary: {_primary_pct(p)}\n"
+        f"🆔 {_fmt_trade_id(p)}\n\n"
+        f"{_market_block(p)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🕒 Time: {_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}\n\n"
+        "Status: RUNNING"
+    )
+
+
+def fmt_trail_update(p: dict[str, Any]) -> str:
+    side = _side_label(p.get("side"))
+    side_emoji = "📈" if side == "BUY" else "📉"
+    pnl_money = _fmt_money_dollar(p.get("unrealized_pnl"))
+    pips = _signed_pips(p.get("side"), p.get("entry_price"), p.get("mark_price"))
+    return (
+        "🟡 <b>UPDATE + TRAILING STOP</b>\n\n"
+        f"🟡 {_symbol(p)} | POSITION UPDATE\n\n"
+        f"{side_emoji} {side}\n\n"
+        f"💵 Price : {_fmt_price(p.get('mark_price'))}\n"
+        f"📈 Move  : {pips} Pips\n"
+        f"💲 Profit: {pnl_money}\n\n"
+        "🔄 Trailing Stop: ACTIVE\n"
+        f"🛡️ New SL: {_fmt_price(p.get('stop_loss'))}\n\n"
+        f"{_market_block(p)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🕒 Time: {_fmt_utc_time(p.get('timestamp'))}\n\n"
+        "Status: PROFIT LOCKED"
     )
 
 
 def fmt_trade_closed(p: dict[str, Any]) -> str:
+    reason = str(p.get("exit_reason") or "").upper()
+    side = _side_label(p.get("side"))
+    if reason == "TRAIL":
+        header = "🟢 <b>TRAIL STOP</b>"
+        title = f"🟢 {_symbol(p)} | TRAIL STOP HIT"
+        status = "CLOSED · TRAIL"
+    elif reason == "TP":
+        header = "🟢 <b>TAKE PROFIT</b>"
+        title = f"🟢 {_symbol(p)} | TAKE PROFIT HIT"
+        status = "CLOSED · TP"
+    elif reason == "TIMEOUT":
+        header = "⚪ <b>TIMEOUT</b>"
+        title = f"⚪ {_symbol(p)} | TIME EXIT"
+        status = "CLOSED · TIMEOUT"
+    else:
+        header = "🔴 <b>STOP LOSS</b>"
+        title = f"🔴 {_symbol(p)} | STOP LOSS HIT"
+        status = "CLOSED · SL"
+
+    side_line = f"{'📉' if side == 'BUY' else '📈'} {side} CLOSED"
+    pips = _signed_pips(p.get("side"), p.get("entry_price"), p.get("exit_price"))
     return (
-        "🔴 <b>TRADE CLOSED</b>\n\n"
-        f"Trade ID : {_fmt_trade_id(p)}\n\n"
-        f"Result   : {_exit_result(p.get('exit_reason'))}\n"
-        f"PnL      : {_fmt_closed_pnl(p)}\n\n"
-        f"Duration : {_fmt_duration(p.get('duration_seconds'))}\n\n"
-        f"Time     : {_fmt_utc_time(p.get('exit_time') or p.get('timestamp'))}"
+        f"{header}\n\n"
+        f"{title}\n\n"
+        f"{side_line}\n\n"
+        f"💰 Entry : {_fmt_price(p.get('entry_price'))}\n"
+        f"🏁 Exit  : {_fmt_price(p.get('exit_price'))}\n\n"
+        f"📉 Move  : {pips} Pips\n"
+        f"💲 PnL   : {_fmt_closed_pnl(p)}\n"
+        f"⏱ Duration: {_fmt_duration(p.get('duration_seconds'))}\n"
+        f"🆔 {_fmt_trade_id(p)}\n\n"
+        f"{_market_block(p)}\n\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🕒 Time: {_fmt_utc_time(p.get('exit_time') or p.get('timestamp'))}\n\n"
+        f"Status: {status}"
     )
 
 

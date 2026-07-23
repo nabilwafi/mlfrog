@@ -57,7 +57,8 @@ class BusTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
-    def test_meta_skip(self) -> None:
+    def test_low_primary_still_opens_with_min_risk(self) -> None:
+        """Sizing from primary: low proba → RISK_MIN; still opens (not a skip gate)."""
         bus = EventBus()
         metrics = MetricsCollector()
         register_workers(bus, db=PostgresWriter(None), telegram=TelegramNotifier(None, None), metrics=metrics)
@@ -68,17 +69,41 @@ class PipelineTests(unittest.TestCase):
             timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
             symbol="XAUUSD",
             side="long",
-            probability=0.6,
-            meta_probability=0.2,
+            probability=0.2,
+            meta_probability=0.9,
             confidence=70,
             entry_price=2000,
             atr=4.0,
             bar_key="t1",
         )
         out = pipe.process_signal(sig)
-        self.assertEqual(out["status"], "skipped")
-        self.assertEqual(out["reason"], "meta")
+        self.assertEqual(out["status"], "opened")
+        pos = state.open_positions[out["trade_id"]]
+        from production import RISK_MIN
+
+        self.assertAlmostEqual(pos.risk_pct, RISK_MIN, places=6)
         time.sleep(0.15)
+        bus.stop()
+
+    def test_confidence_ignored(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=5.0,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="conf_off",
+            )
+        )
+        self.assertEqual(out["status"], "opened")
         bus.stop()
 
     def test_open_and_close(self) -> None:
@@ -102,6 +127,8 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(out["status"], "opened")
         tid = out["trade_id"]
         self.assertIn(tid, state.open_positions)
+        pos = state.open_positions[tid]
+        self.assertNotAlmostEqual(pos.risk_pct, 0.01, places=5)  # edge-sized, not flat 1%
         # hit TP
         closed = pipe.on_bar(high=2010, low=1999, close=2005, timestamp=datetime(2024, 1, 2, 12, tzinfo=timezone.utc))
         self.assertTrue(len(closed) >= 1)
@@ -131,47 +158,235 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(b["reason"], "duplicate")
         bus.stop()
 
+    def test_blocks_second_side_while_open(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        long = IncomingSignal(
+            timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+            symbol="XAUUSD",
+            side="long",
+            probability=0.6,
+            meta_probability=0.55,
+            confidence=55,
+            entry_price=2000,
+            atr=4.0,
+            bar_key="bar:long",
+        )
+        short = IncomingSignal(
+            timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+            symbol="XAUUSD",
+            side="short",
+            probability=0.6,
+            meta_probability=0.60,
+            confidence=55,
+            entry_price=2000,
+            atr=4.0,
+            bar_key="bar:short",
+        )
+        a = pipe.process_signal(long)
+        b = pipe.process_signal(short)
+        self.assertEqual(a["status"], "opened")
+        # max_open=1 trips before opposite check
+        self.assertEqual(b["reason"], "max_open")
+        self.assertEqual(len(state.open_positions), 1)
+        bus.stop()
+
+    def test_multi_entry_same_side(self) -> None:
+        """Policy lock: max_open=1 — second same-side entry is blocked."""
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        first = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="stack:0",
+            )
+        )
+        second = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="stack:1",
+            )
+        )
+        self.assertEqual(first["status"], "opened")
+        self.assertEqual(second["reason"], "max_open")
+        self.assertEqual(len(state.open_positions), 1)
+        bus.stop()
+
+    def test_session_gate_skips_outside_hours(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 3, tzinfo=timezone.utc),  # outside 09-15
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="sess:out",
+            )
+        )
+        self.assertEqual(out["status"], "skipped")
+        self.assertEqual(out["reason"], "session")
+        bus.stop()
+
+    def test_atr_trail_ratchets_and_exits(self) -> None:
+        """After +0.5R, trail SL tightens; pullback hits TRAIL."""
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        # atr=4, SL_ATR=1.5 → 1R=6; 0.5R=3 → need high >= 2003 to arm trail
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="trail:1",
+            )
+        )
+        self.assertEqual(out["status"], "opened")
+        tid = out["trade_id"]
+        # arm trail without touching it: high=2004, low stays above trail SL (~2003.52)
+        pipe.on_bar(high=2004, low=2003.6, close=2003.8, timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc))
+        self.assertIn(tid, state.open_positions)
+        self.assertGreater(state.open_positions[tid].stop_loss, 2000 - 1.5 * 4)
+        # pullback through trail SL
+        closed = pipe.on_bar(
+            high=2003.7, low=2003.0, close=2003.2, timestamp=datetime(2024, 1, 2, 12, tzinfo=timezone.utc)
+        )
+        self.assertTrue(len(closed) >= 1)
+        self.assertEqual(closed[0]["exit_reason"], "TRAIL")
+        self.assertNotIn(tid, state.open_positions)
+        bus.stop()
+
 
 class TelegramFmtTests(unittest.TestCase):
     def test_fmt_new_trade(self) -> None:
         text = fmt_new_trade(
             {
                 "trade_id": "00000000000000000000000000000400",
+                "symbol": "XAUUSD",
                 "side": "long",
                 "entry_price": 3345.5,
                 "stop_loss": 3338.0,
                 "take_profit": 3360.0,
+                "lot": 0.10,
                 "risk_pct": 0.01,
-                "confidence": 82,
+                "probability": 0.82,
+                "trail_atr_mult": 0.12,
+                "trail_activate_r": 0.5,
+                "trend": "bull",
+                "volatility": "high",
+                "momentum": "strong",
+                "structure": "trend",
+                "session": "london",
                 "entry_time": datetime(2026, 7, 19, 15, 30, tzinfo=timezone.utc),
             }
         )
-        self.assertIn("NEW TRADE", text)
-        self.assertIn("Trade ID : #1024", text)
-        self.assertIn("Side     : BUY", text)
-        self.assertIn("Entry    : 3345.50", text)
-        self.assertIn("SL / TP  : 3338.00 / 3360.00", text)
-        self.assertIn("Risk     : 1.0%", text)
-        self.assertIn("Confidence : 82%", text)
-        self.assertIn("Time     : 15:30 UTC", text)
+        self.assertIn("OPEN POSITION", text)
+        self.assertIn("TRADE OPEN", text)
+        self.assertIn("BUY", text)
+        self.assertIn("Entry : 3345.50", text)
+        self.assertIn("SL    : 3338.00", text)
+        self.assertIn("ATR Trail 0.12", text)
+        self.assertIn("Primary: 82.0%", text)
+        self.assertIn("TRENDING BULLISH", text)
+        self.assertIn("London", text)
+        self.assertIn("15:30 UTC", text)
+        self.assertNotIn("Strategy", text)
+        self.assertNotIn("Confidence", text)
+
+    def test_fmt_trail_update(self) -> None:
+        from production.telegram.bot import fmt_trail_update
+
+        text = fmt_trail_update(
+            {
+                "symbol": "XAUUSD",
+                "side": "long",
+                "entry_price": 3382.50,
+                "mark_price": 3388.20,
+                "stop_loss": 3385.00,
+                "unrealized_pnl": 57.0,
+                "trend": "bull",
+                "structure": "trend",
+                "volatility": "high",
+                "momentum": "strong",
+                "session": "london",
+                "timestamp": datetime(2026, 7, 19, 16, 0, tzinfo=timezone.utc),
+            }
+        )
+        self.assertIn("UPDATE + TRAILING STOP", text)
+        self.assertIn("New SL: 3385.00", text)
+        self.assertIn("PROFIT LOCKED", text)
+        self.assertNotIn("Strategy", text)
+        self.assertNotIn("Reversal", text)
 
     def test_fmt_trade_closed(self) -> None:
         text = fmt_trade_closed(
             {
                 "trade_id": "00000000000000000000000000000400",
-                "exit_reason": "TP",
-                "pnl": 125,
-                "pnl_r": 2.5,
+                "symbol": "XAUUSD",
+                "side": "long",
+                "entry_price": 3382.50,
+                "exit_price": 3376.50,
+                "exit_reason": "SL",
+                "pnl": -60,
+                "pnl_r": -1.0,
                 "duration_seconds": 2 * 3600 + 14 * 60,
+                "trend": "bull",
+                "structure": "trend",
+                "session": "london",
                 "exit_time": datetime(2026, 7, 19, 17, 44, tzinfo=timezone.utc),
             }
         )
-        self.assertIn("TRADE CLOSED", text)
-        self.assertIn("Trade ID : #1024", text)
-        self.assertIn("Result   : TP ✅", text)
-        self.assertIn("PnL      : +2.5R (+$125)", text)
-        self.assertIn("Duration : 2h 14m", text)
-        self.assertIn("Time     : 17:44 UTC", text)
+        self.assertIn("STOP LOSS", text)
+        self.assertIn("Entry : 3382.50", text)
+        self.assertIn("Exit  : 3376.50", text)
+        self.assertIn("17:44 UTC", text)
+        self.assertNotIn("Reversal", text)
+        self.assertNotIn("Strategy", text)
+
+        trail = fmt_trade_closed(
+            {
+                "side": "long",
+                "entry_price": 2000.0,
+                "exit_price": 2004.0,
+                "exit_reason": "TRAIL",
+                "pnl": 40,
+                "pnl_r": 0.8,
+                "duration_seconds": 3600,
+            }
+        )
+        self.assertIn("TRAIL STOP", trail)
+        self.assertNotIn("Reversal", trail)
 
     def test_fmt_skipped(self) -> None:
         text = fmt_skipped(
@@ -347,7 +562,8 @@ class LiveSourceTests(unittest.TestCase):
         src = LiveMT5SignalSource({"timezone": "UTC"}, symbol="XAUUSD")
         src._feed = FakeFeed()  # type: ignore[assignment]
         src._features.build_panel = lambda **_: pd.DataFrame(  # type: ignore[method-assign]
-            [{"timestamp": ts, "atr_percent": 0.002, "session_london": 1.0, "d1_regime": "Sideways"}]
+            # atr_percent is % of price (VolatilityBuilder): 0.2 => ATR = 0.2% of close
+            [{"timestamp": ts, "atr_percent": 0.2, "session_london": 1.0, "d1_regime": "Sideways"}]
         )
         src._inference = FakeInference()  # type: ignore[assignment]
 
@@ -355,7 +571,8 @@ class LiveSourceTests(unittest.TestCase):
         t2 = src.poll()
         self.assertIsNotNone(t1.bar)
         self.assertEqual(t1.bar.symbol, "XAUUSD")
-        self.assertEqual(len(t1.signals), 2)
+        self.assertEqual(len(t1.signals), 1)  # one side per bar (best meta)
+        self.assertAlmostEqual(t1.signals[0].atr, 2302.0 * 0.2 / 100.0, places=6)
         self.assertEqual(len(t2.signals), 0)
 
 

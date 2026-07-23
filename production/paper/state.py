@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
-from production import DAILY_LOSS_STOP_R, RISK_PCT
+from production import DAILY_LOSS_STOP_R, RISK_BASE
 
 
 @dataclass
@@ -26,6 +26,9 @@ class OpenPosition:
     meta: dict[str, Any] = field(default_factory=dict)
     mae: float = 0.0
     mfe: float = 0.0
+    # trail exit state (ATR trail engine)
+    extreme_fav: float = 0.0  # best favorable price seen
+    bars_held: int = 0
 
 
 @dataclass
@@ -65,7 +68,7 @@ class PortfolioState:
             self.pnl_today = 0.0
 
     def r_unit(self) -> float:
-        return self.equity * RISK_PCT
+        return self.equity * RISK_BASE
 
     def daily_heat_blocked(self) -> bool:
         ru = self.r_unit()

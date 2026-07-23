@@ -10,18 +10,30 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from production import (
+    BLOCK_OPPOSITE_SIDE,
+    CONFIDENCE_ENABLED,
     CONFIDENCE_SKIP,
+    EXIT_HORIZON_BARS,
+    EXIT_MODE,
     FEATURE_VERSION,
     LABEL_VERSION,
+    MAX_OPEN_POSITIONS,
+    META_AS_GATE,
     META_THRESHOLD,
     META_VERSION,
     MODEL_VERSION,
     PIPELINE_VERSION,
-    RISK_PCT,
+    SESSION_GATE_ENABLED,
+    SESSION_HOUR_END_UTC,
+    SESSION_HOUR_START_UTC,
+    SIZE_FROM_PRIMARY,
+    TRAIL_ACTIVATE_R,
+    TRAIL_ATR_MULT,
 )
 from production.events.bus import EventBus
 from production.events.types import EventType, make_event
 from production.paper.broker import PaperBroker
+from production.paper.edge_sizing import expected_r_from_edge, risk_pct_from_edge
 from production.paper.state import OpenPosition, PortfolioState
 from research.portfolio_backtest.services.engine import _lots_from_equity
 from settings.strategy import SL_ATR_MULT, TP_ATR_MULT
@@ -43,6 +55,10 @@ class IncomingSignal:
     atr: float
     session: str = "unknown"
     regime: str = "unknown"
+    trend: str = "unknown"
+    volatility: str = "unknown"
+    momentum: str = "unknown"
+    structure: str = "unknown"
     bar_key: str = ""  # for idempotency
 
 
@@ -84,6 +100,29 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "duplicate", None, None)
             return {"status": "skipped", "reason": "duplicate", "correlation_id": corr}
 
+        # Session gate (UTC hour inclusive) — trail-engine policy 09–15
+        if SESSION_GATE_ENABLED:
+            hour = int(now.astimezone(timezone.utc).hour)
+            if hour < int(SESSION_HOUR_START_UTC) or hour > int(SESSION_HOUR_END_UTC):
+                self.state.skips += 1
+                self._skip(corr, signal_id, sig, "session", float(SESSION_HOUR_START_UTC), float(hour))
+                return {"status": "skipped", "reason": "session", "correlation_id": corr}
+
+        # Multi-entry cap + optional no-opposite
+        n_open = len(self.state.open_positions)
+        if n_open >= int(MAX_OPEN_POSITIONS):
+            self.state.skips += 1
+            self._skip(corr, signal_id, sig, "max_open", float(MAX_OPEN_POSITIONS), float(n_open))
+            return {"status": "skipped", "reason": "max_open", "correlation_id": corr}
+
+        if BLOCK_OPPOSITE_SIDE and n_open > 0:
+            open_sides = {p.side for p in self.state.open_positions.values()}
+            sig_side = str(sig.side).lower()
+            if open_sides and sig_side not in open_sides:
+                self.state.skips += 1
+                self._skip(corr, signal_id, sig, "opposite_blocked", 1.0, float(n_open))
+                return {"status": "skipped", "reason": "opposite_blocked", "correlation_id": corr}
+
         # Publish signal row (accepted TBD)
         base_signal = {
             "signal_id": signal_id,
@@ -92,8 +131,11 @@ class ProductionPipeline:
             "probability": sig.probability,
             "meta_probability": sig.meta_probability,
             "confidence": sig.confidence,
+            "expected_r": expected_r_from_edge(float(sig.meta_probability)),
             "threshold_meta": META_THRESHOLD,
             "threshold_confidence": CONFIDENCE_SKIP,
+            "meta_as_gate": META_AS_GATE,
+            "confidence_enabled": CONFIDENCE_ENABLED,
             "model_version": MODEL_VERSION,
             "meta_version": META_VERSION,
             "feature_version": FEATURE_VERSION,
@@ -109,16 +151,15 @@ class ProductionPipeline:
             make_event(EventType.METRIC, {"name": "inference_latency_ms", "value": inference_ms}, correlation_id=corr)
         )
 
-        # Meta filter
-        if float(sig.meta_probability) < META_THRESHOLD:
+        # Meta as gate only if restored; step 3 = edge for sizing only
+        if META_AS_GATE and float(sig.meta_probability) < META_THRESHOLD:
             self.state.meta_rejects += 1
             self.state.skips += 1
             self.bus.publish(make_event(EventType.SIGNAL, {**base_signal, "accepted": False}, correlation_id=corr))
             self._skip(corr, signal_id, sig, "meta", META_THRESHOLD, sig.meta_probability)
             return {"status": "skipped", "reason": "meta", "correlation_id": corr}
 
-        # Confidence filter
-        if float(sig.confidence) < CONFIDENCE_SKIP:
+        if CONFIDENCE_ENABLED and float(sig.confidence) < CONFIDENCE_SKIP:
             self.state.confidence_rejects += 1
             self.state.skips += 1
             self.bus.publish(make_event(EventType.SIGNAL, {**base_signal, "accepted": False}, correlation_id=corr))
@@ -134,11 +175,15 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "heat", -1.0, self.state.day_pnl / max(self.state.r_unit(), 1e-9))
             return {"status": "skipped", "reason": "heat", "correlation_id": corr}
 
-        # Risk / sizing
+        # Risk / sizing (option C): primary proba when SIZE_FROM_PRIMARY else meta
+        edge = float(sig.probability if SIZE_FROM_PRIMARY else sig.meta_probability)
+        expected_r = expected_r_from_edge(edge)
+        risk_pct = risk_pct_from_edge(edge)
+
         if self.state.equity <= 0 or sig.atr <= 0:
             self.state.skips += 1
             self.bus.publish(make_event(EventType.SIGNAL, {**base_signal, "accepted": False}, correlation_id=corr))
-            self._skip(corr, signal_id, sig, "risk", RISK_PCT, self.state.equity)
+            self._skip(corr, signal_id, sig, "risk", risk_pct, self.state.equity)
             return {"status": "skipped", "reason": "risk", "correlation_id": corr}
 
         lots = _lots_from_equity(
@@ -146,12 +191,12 @@ class ProductionPipeline:
             float(sig.atr),
             mode="risk",
             fixed_lots=None,
-            risk_pct=RISK_PCT,
+            risk_pct=risk_pct,
             enforce_volume_min=False,
         )
         if lots <= 0:
             self.state.skips += 1
-            self._skip(corr, signal_id, sig, "risk", RISK_PCT, lots)
+            self._skip(corr, signal_id, sig, "risk", risk_pct, lots)
             return {"status": "skipped", "reason": "risk", "correlation_id": corr}
 
         side = str(sig.side).lower()
@@ -206,15 +251,27 @@ class ProductionPipeline:
             stop_loss=sl,
             take_profit=tp,
             lot=lots,
-            risk_pct=RISK_PCT,
+            risk_pct=risk_pct,
             atr=atr,
             correlation_id=corr,
+            extreme_fav=fill.fill_price,
+            bars_held=0,
             meta={
                 "probability": sig.probability,
                 "meta_probability": sig.meta_probability,
                 "confidence": sig.confidence,
+                "expected_r": expected_r,
                 "session": sig.session,
                 "regime": sig.regime,
+                "trend": sig.trend,
+                "volatility": sig.volatility,
+                "momentum": sig.momentum,
+                "structure": sig.structure,
+                "exit_mode": EXIT_MODE,
+                "trail_atr_mult": TRAIL_ATR_MULT,
+                "trail_activate_r": TRAIL_ACTIVATE_R,
+                "edge_score": edge,
+                "initial_sl": sl,
             },
         )
         self.state.open_positions[fill.trade_id] = pos
@@ -233,7 +290,9 @@ class ProductionPipeline:
                     "stop_loss": sl,
                     "take_profit": tp,
                     "lot": lots,
-                    "risk_pct": RISK_PCT,
+                    "risk_pct": risk_pct,
+                    "expected_r": expected_r,
+                    "edge_score": edge,
                     "latency_ms": fill.latency_ms,
                     "broker_response": fill.broker_response,
                     "spread": fill.spread,
@@ -241,9 +300,16 @@ class ProductionPipeline:
                     "retry_count": fill.retry_count,
                     "session": sig.session,
                     "regime": sig.regime,
+                    "trend": sig.trend,
+                    "volatility": sig.volatility,
+                    "momentum": sig.momentum,
+                    "structure": sig.structure,
                     "probability": sig.probability,
                     "meta_probability": sig.meta_probability,
                     "confidence": sig.confidence,
+                    "exit_mode": EXIT_MODE,
+                    "trail_atr_mult": TRAIL_ATR_MULT,
+                    "trail_activate_r": TRAIL_ACTIVATE_R,
                     "environment": self.environment,
                 },
                 correlation_id=corr,
@@ -258,13 +324,68 @@ class ProductionPipeline:
         )
         return {"status": "opened", "trade_id": fill.trade_id, "correlation_id": corr}
 
+    def _update_trail(self, pos: OpenPosition, *, high: float, low: float) -> bool:
+        """Ratchet SL after +TRAIL_ACTIVATE_R using TRAIL_ATR_MULT. Returns True if SL moved."""
+        if str(EXIT_MODE).lower() != "atr_trail":
+            return False
+        atr = float(pos.atr)
+        if atr <= 0:
+            return False
+        prev = float(pos.stop_loss)
+        one_r = float(SL_ATR_MULT) * atr
+        if pos.side == "long":
+            pos.extreme_fav = max(float(pos.extreme_fav or pos.entry_price), float(high))
+            fav = pos.extreme_fav - pos.entry_price
+            if fav >= float(TRAIL_ACTIVATE_R) * one_r:
+                trail_sl = pos.extreme_fav - float(TRAIL_ATR_MULT) * atr
+                pos.stop_loss = max(pos.stop_loss, trail_sl)
+        else:
+            pos.extreme_fav = min(float(pos.extreme_fav or pos.entry_price), float(low))
+            fav = pos.entry_price - pos.extreme_fav
+            if fav >= float(TRAIL_ACTIVATE_R) * one_r:
+                trail_sl = pos.extreme_fav + float(TRAIL_ATR_MULT) * atr
+                pos.stop_loss = min(pos.stop_loss, trail_sl)
+        return abs(float(pos.stop_loss) - prev) > 1e-9
+
     def on_bar(self, *, high: float, low: float, close: float, timestamp: datetime) -> list[dict[str, Any]]:
-        """Mark open positions; close on SL/TP hit (SL first same-bar)."""
+        """Mark open positions; ATR-trail ratchet then SL/TP/TIMEOUT (SL first same-bar)."""
         closed = []
         for tid, pos in list(self.state.open_positions.items()):
+            pos.bars_held = int(pos.bars_held) + 1
             mae, mfe = PaperBroker.mark_excursions(pos.side, pos.entry_price, high, low)
             pos.mae = max(pos.mae, mae)
             pos.mfe = max(pos.mfe, mfe)
+            moved = self._update_trail(pos, high=high, low=low)
+            if moved:
+                u_pnl = PaperBroker.pnl(pos.side, pos.entry_price, float(close), pos.lot)
+                self.bus.publish(
+                    make_event(
+                        EventType.TRAIL_UPDATE,
+                        {
+                            "trade_id": tid,
+                            "signal_id": pos.signal_id,
+                            "symbol": self.symbol,
+                            "side": pos.side,
+                            "entry_price": pos.entry_price,
+                            "mark_price": float(close),
+                            "stop_loss": pos.stop_loss,
+                            "lot": pos.lot,
+                            "unrealized_pnl": u_pnl,
+                            "trail_atr_mult": pos.meta.get("trail_atr_mult", TRAIL_ATR_MULT),
+                            "trail_activate_r": pos.meta.get("trail_activate_r", TRAIL_ACTIVATE_R),
+                            "session": pos.meta.get("session"),
+                            "regime": pos.meta.get("regime"),
+                            "trend": pos.meta.get("trend"),
+                            "volatility": pos.meta.get("volatility"),
+                            "momentum": pos.meta.get("momentum"),
+                            "structure": pos.meta.get("structure"),
+                            "timestamp": timestamp,
+                            "environment": self.environment,
+                        },
+                        correlation_id=pos.correlation_id,
+                    )
+                )
+
             hit_sl = (low <= pos.stop_loss) if pos.side == "long" else (high >= pos.stop_loss)
             hit_tp = (high >= pos.take_profit) if pos.side == "long" else (low <= pos.take_profit)
             reason = None
@@ -272,9 +393,13 @@ class ProductionPipeline:
             if hit_sl and hit_tp:
                 reason, exit_px = "SL", pos.stop_loss
             elif hit_sl:
-                reason, exit_px = "SL", pos.stop_loss
+                init_sl = float(pos.meta.get("initial_sl", pos.stop_loss))
+                reason = "TRAIL" if abs(pos.stop_loss - init_sl) > 1e-9 else "SL"
+                exit_px = pos.stop_loss
             elif hit_tp:
                 reason, exit_px = "TP", pos.take_profit
+            elif pos.bars_held >= int(EXIT_HORIZON_BARS):
+                reason, exit_px = "TIMEOUT", close
             if reason is None:
                 continue
             fill = self.broker.close_order(tid, exit_px)
@@ -308,9 +433,14 @@ class ProductionPipeline:
                 "status": "closed",
                 "session": pos.meta.get("session"),
                 "regime": pos.meta.get("regime"),
+                "trend": pos.meta.get("trend"),
+                "volatility": pos.meta.get("volatility"),
+                "momentum": pos.meta.get("momentum"),
+                "structure": pos.meta.get("structure"),
                 "probability": pos.meta.get("probability"),
                 "meta_probability": pos.meta.get("meta_probability"),
                 "confidence": pos.meta.get("confidence"),
+                "trail_atr_mult": pos.meta.get("trail_atr_mult", TRAIL_ATR_MULT),
                 "equity": self.state.equity,
                 "broker_response": fill.broker_response,
                 "environment": self.environment,
