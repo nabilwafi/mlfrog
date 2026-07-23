@@ -230,14 +230,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(state.open_positions), 1)
         bus.stop()
 
-    def test_session_gate_skips_outside_hours(self) -> None:
+    def test_session_gate_disabled_allows_all_hours(self) -> None:
         bus = EventBus()
         bus.start(n_workers=1)
         state = PortfolioState(equity=10_000, peak_equity=10_000)
         pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
         out = pipe.process_signal(
             IncomingSignal(
-                timestamp=datetime(2024, 1, 2, 3, tzinfo=timezone.utc),  # outside 09-15
+                timestamp=datetime(2024, 1, 2, 3, tzinfo=timezone.utc),  # previously outside 09-15
                 symbol="XAUUSD",
                 side="long",
                 probability=0.6,
@@ -245,11 +245,10 @@ class PipelineTests(unittest.TestCase):
                 confidence=55,
                 entry_price=2000,
                 atr=4.0,
-                bar_key="sess:out",
+                bar_key="sess:all",
             )
         )
-        self.assertEqual(out["status"], "skipped")
-        self.assertEqual(out["reason"], "session")
+        self.assertEqual(out["status"], "opened")
         bus.stop()
 
     def test_atr_trail_ratchets_and_exits(self) -> None:
