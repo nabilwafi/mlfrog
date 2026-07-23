@@ -44,7 +44,9 @@ class PaperRuntime:
         self.bus.publish(
             make_event(EventType.AUDIT, {"component": "runtime", "action": "start", "detail": {}})
         )
-        last_day = None
+        # Startup daily snapshot (do not roll counters)
+        self.pipeline.emit_daily_summary(extra={"reason": "startup"}, roll=False)
+        last_day = datetime.now(timezone.utc).date()
         if hasattr(self.source, "connect"):
             self.source.connect()
         while not self._stop.is_set():
@@ -52,7 +54,7 @@ class PaperRuntime:
                 # Emit yesterday's summary before processing today's bars/signals
                 today = datetime.now(timezone.utc).date()
                 if last_day is not None and today != last_day:
-                    self.pipeline.emit_daily_summary()
+                    self.pipeline.emit_daily_summary(extra={"reason": "day_roll"}, roll=True)
                 last_day = today
 
                 if hasattr(self.source, "poll"):
@@ -95,7 +97,7 @@ class PaperRuntime:
                     )
                 )
             self._stop.wait(self.poll_seconds)
-        self.pipeline.emit_daily_summary()
+        self.pipeline.emit_daily_summary(extra={"reason": "shutdown"}, roll=False)
         if hasattr(self.source, "disconnect"):
             self.source.disconnect()
         self.bus.publish(

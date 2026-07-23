@@ -47,6 +47,8 @@ class PortfolioState:
     trades_today: int = 0
     wins_today: int = 0
     pnl_today: float = 0.0
+    best_trade_pnl_today: float | None = None
+    worst_trade_pnl_today: float | None = None
     started_mono: float = field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
@@ -66,6 +68,8 @@ class PortfolioState:
             self.trades_today = 0
             self.wins_today = 0
             self.pnl_today = 0.0
+            self.best_trade_pnl_today = None
+            self.worst_trade_pnl_today = None
 
     def r_unit(self) -> float:
         return self.equity * RISK_BASE
@@ -96,3 +100,7 @@ class PortfolioState:
         self.peak_equity = max(self.peak_equity, self.equity)
         self.day_pnl += pnl
         self.pnl_today += pnl
+        if self.best_trade_pnl_today is None or pnl > self.best_trade_pnl_today:
+            self.best_trade_pnl_today = float(pnl)
+        if self.worst_trade_pnl_today is None or pnl < self.worst_trade_pnl_today:
+            self.worst_trade_pnl_today = float(pnl)

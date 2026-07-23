@@ -16,6 +16,7 @@ from production import (
     EXIT_HORIZON_BARS,
     EXIT_MODE,
     FEATURE_VERSION,
+    FIXED_LOT,
     LABEL_VERSION,
     MAX_OPEN_POSITIONS,
     META_AS_GATE,
@@ -27,6 +28,7 @@ from production import (
     SESSION_HOUR_END_UTC,
     SESSION_HOUR_START_UTC,
     SIZE_FROM_PRIMARY,
+    SIZE_MODE,
     TRAIL_ACTIVATE_R,
     TRAIL_ATR_MULT,
 )
@@ -175,7 +177,7 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "heat", -1.0, self.state.day_pnl / max(self.state.r_unit(), 1e-9))
             return {"status": "skipped", "reason": "heat", "correlation_id": corr}
 
-        # Risk / sizing (option C): primary proba when SIZE_FROM_PRIMARY else meta
+        # Risk / sizing
         edge = float(sig.probability if SIZE_FROM_PRIMARY else sig.meta_probability)
         expected_r = expected_r_from_edge(edge)
         risk_pct = risk_pct_from_edge(edge)
@@ -186,14 +188,17 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "risk", risk_pct, self.state.equity)
             return {"status": "skipped", "reason": "risk", "correlation_id": corr}
 
-        lots = _lots_from_equity(
-            self.state.equity,
-            float(sig.atr),
-            mode="risk",
-            fixed_lots=None,
-            risk_pct=risk_pct,
-            enforce_volume_min=False,
-        )
+        if str(SIZE_MODE).lower() == "fixed":
+            lots = float(FIXED_LOT)
+        else:
+            lots = _lots_from_equity(
+                self.state.equity,
+                float(sig.atr),
+                mode="risk",
+                fixed_lots=None,
+                risk_pct=risk_pct,
+                enforce_volume_min=True,
+            )
         if lots <= 0:
             self.state.skips += 1
             self._skip(corr, signal_id, sig, "risk", risk_pct, lots)
@@ -449,9 +454,19 @@ class ProductionPipeline:
             closed.append(payload)
         return closed
 
-    def emit_daily_summary(self, day: datetime | None = None, *, extra: dict[str, Any] | None = None) -> None:
-        """Publish stats for the current trading day, then roll calendar if needed."""
+    def emit_daily_summary(
+        self,
+        day: datetime | None = None,
+        *,
+        extra: dict[str, Any] | None = None,
+        roll: bool = True,
+    ) -> None:
+        """Publish stats for the current trading day. Optionally roll calendar after."""
         now = day or datetime.now(timezone.utc)
+        if self.state.day is None:
+            self.state.day = now.date()
+            if self.state.day_start_equity <= 0:
+                self.state.day_start_equity = float(self.state.equity)
         trades = int(self.state.trades_today)
         wins = int(self.state.wins_today)
         losses = max(0, trades - wins)
@@ -465,7 +480,9 @@ class ProductionPipeline:
         report_date = self.state.day.isoformat() if self.state.day else now.date().isoformat()
         payload: dict[str, Any] = {
             "date": report_date,
+            "symbol": self.symbol,
             "status": status,
+            "balance": start_eq,
             "equity": self.state.equity,
             "daily_r": self.state.day_pnl / max(self.state.r_unit(), 1e-9),
             "drawdown": self.state.drawdown(),
@@ -476,16 +493,20 @@ class ProductionPipeline:
             "winrate": wr,
             "pnl": pnl,
             "pnl_pct": pnl_pct,
+            "best_trade_pnl": self.state.best_trade_pnl_today,
+            "worst_trade_pnl": self.state.worst_trade_pnl_today,
             "skipped": self.state.skips,
             "meta_rejects": self.state.meta_rejects,
             "confidence_rejects": self.state.confidence_rejects,
             "uptime_seconds": time.monotonic() - float(self.state.started_mono),
+            "environment": self.environment,
         }
         if extra:
             payload.update(extra)
         self.bus.publish(make_event(EventType.DAILY_SUMMARY, payload))
         # roll after publish so midnight summary still has yesterday's counters
-        self.state.roll_day(now)
+        if roll:
+            self.state.roll_day(now)
 
     def _skip(
         self,
