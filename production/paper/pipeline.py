@@ -100,7 +100,7 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "duplicate", None, None)
             return {"status": "skipped", "reason": "duplicate", "correlation_id": corr}
 
-        # Session gate (UTC hour inclusive) — trail-engine policy 09–15
+        # Session gate (UTC hour inclusive) — disabled when SESSION_GATE_ENABLED=False
         if SESSION_GATE_ENABLED:
             hour = int(now.astimezone(timezone.utc).hour)
             if hour < int(SESSION_HOUR_START_UTC) or hour > int(SESSION_HOUR_END_UTC):

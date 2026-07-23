@@ -1,8 +1,8 @@
 """Sprint 27 — Production paper trading policy knobs.
 
-Locked to WF exit-engine winner (2015–2026):
-  Primary top 5% + session 09–15 UTC + ATR trail 0.12 + max_open 1
-  (~WR 70%, PF ~1.77 on that backtest; live may differ with spread).
+Locked exit-engine: Primary top 5% + ATR trail 0.12 + max_open 1.
+Session gate OFF (all UTC hours). Prior 09-15 filter was quality-biased;
+all-session keeps higher density with still-acceptable PF/DD.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ CONFIDENCE_SKIP: float = 40.0
 # Primary density (live rolling percentile gate)
 PRIMARY_TOP_PCT: float = 0.05
 
-# Session gate (UTC hour inclusive). Backtest winner: 09–15.
+# Session gate (UTC hour inclusive). Off = trade all hours.
 SESSION_HOUR_START_UTC: int = 9
 SESSION_HOUR_END_UTC: int = 15
-SESSION_GATE_ENABLED: bool = True
+SESSION_GATE_ENABLED: bool = False
 
 # --- Portfolio concurrency ---
 MAX_OPEN_POSITIONS: int = 1
@@ -46,4 +46,4 @@ MODEL_VERSION: str = "primary_v3_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "sprint19_18feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v1_trail012_sess0915_top5"
+PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5"
