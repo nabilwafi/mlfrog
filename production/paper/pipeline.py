@@ -192,7 +192,7 @@ class ProductionPipeline:
             mode="risk",
             fixed_lots=None,
             risk_pct=risk_pct,
-            enforce_volume_min=False,
+            enforce_volume_min=True,
         )
         if lots <= 0:
             self.state.skips += 1
