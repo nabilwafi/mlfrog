@@ -1,4 +1,4 @@
-"""Sprint XX - Exit Engine Audit for ATR Trail 0.12 (entry frozen).
+"""Sprint XX — Exit Engine Audit for ATR Trail 0.12 (entry frozen).
 
 No ML retrain / no entry changes. Path-level audit + robustness + charts.
 """
@@ -216,7 +216,7 @@ def main() -> None:
 
     # ----- 2. Attribution -----
     def attr(group_cols: list[str]) -> pd.DataFrame:
-        # settle PnL via simple sum of net_return * proxy - use portfolio trades merge
+        # settle PnL via simple sum of net_return * proxy — use portfolio trades merge
         g = panel.copy()
         # approximate $ pnl proportional to net_return for attribution shares
         g["pnl_proxy"] = g["net_return"]
@@ -299,7 +299,7 @@ def main() -> None:
     for spread_bp in (1.5, 3.0, 5.0, 8.0):
         for slip_pts in (0, 1, 2, 3):
             # spread_bp is total round-trip-ish friction in bp of price
-            # slip points each side -> 2 * slip_pts * POINT / entry_mean
+            # slip points each side → 2 * slip_pts * POINT / entry_mean
             entry_mean = float(panel["entry_price"].mean())
             slip_frac = 2.0 * slip_pts * POINT / entry_mean
             spread_frac = spread_bp * 1e-4
@@ -364,7 +364,7 @@ def main() -> None:
     if not traded.empty:
         fig, ax = plt.subplots(figsize=(9, 4))
         ax.plot(pd.to_datetime(traded["timestamp"], utc=True), traded["equity"], color="steelblue")
-        ax.set_title(f"Equity - ATR Trail {TRAIL} (frozen entry)")
+        ax.set_title(f"Equity — ATR Trail {TRAIL} (frozen entry)")
         ax.set_ylabel("equity")
         fig.autofmt_xdate()
         fig.tight_layout()

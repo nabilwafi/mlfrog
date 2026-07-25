@@ -1,4 +1,15 @@
-"""Realistic execution sim for trail policy (bid/ask, hour-spread, slip, latency, gap, requote).
+def prepare_mkt(h1: pd.DataFrame) -> dict:
+    h = h1.sort_values("timestamp").reset_index(drop=True).copy()
+    h["timestamp"] = pd.to_datetime(h["timestamp"], utc=True)
+    if "open" not in h.columns:
+        h["open"] = h["close"].shift(1).fillna(h["close"])
+    high = h["high"].to_numpy(dtype=float)
+    low = h["low"].to_numpy(dtype=float)
+    close = h["close"].to_numpy(dtype=float)
+    open_ = h["open"].to_numpy(dtype=float)
+    ts = h["timestamp"].to_numpy()
+    atr = wilder_atr(high, low, close, 14)
+    return {"high": high, "low": low, "close": close, "open": open_, "atr": atr, "ts": ts}"""Realistic execution sim for trail policy (bid/ask, hour-spread, slip, latency, gap, requote).
 
 H1 has no ticks — latency/gap/requote are bar-path approximations (documented below).
 """

@@ -80,7 +80,7 @@ class MT5CandleFeed:
 
     def __init__(self, cfg: dict[str, Any], *, symbol: str, log: logging.Logger | None = None) -> None:
         self._cfg = cfg
-        self._symbol = symbol.upper()
+        self._symbol = str(symbol)  # HF: XAUUSDc is case-sensitive — do NOT .upper()
         self._log = log or logger
         self._symbol_selected = False
 

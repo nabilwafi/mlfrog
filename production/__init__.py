@@ -1,6 +1,6 @@
-"""Sprint 27 — Production paper trading policy knobs.
+"""Production paper/live policy knobs (locked exit-engine path).
 
-Locked exit-engine: Primary top 5% + ATR trail 0.12 + max_open 1.
+Locked: Primary top 5% + ATR trail 0.12 + max_open 1.
 Session gate OFF (all UTC hours). Finex-style fixed lot 0.01.
 """
 
@@ -42,9 +42,24 @@ EXIT_MODE: str = "atr_trail"  # atr_trail | barrier
 TRAIL_ATR_MULT: float = 0.12
 TRAIL_ACTIVATE_R: float = 0.5  # activate after +0.5R (R = SL_ATR * atr)
 EXIT_HORIZON_BARS: int = 16
+TRAIL_HORIZON: int = 16  # alias used by older call sites
+SL_ATR_MULT: float = 1.5
+
+# --- Account sync (MT5 account_info) ---
+USE_ACCOUNT_EQUITY: bool = True
+ACCOUNT_LEVERAGE_FALLBACK: float = 500.0
+
+# --- Live execution safety ---
+# paper = MT5 candles + paper fills (no order_send)
+# live  = MT5 candles + real order_send WHEN this flag is True
+EXECUTION_ENABLED: bool = False  # dry-run by default; set True to send real orders
+
+# HF cent account: trade XAUUSDc (case-sensitive on HF). Research artifacts stay XAUUSD.
+LIVE_SYMBOL: str = "XAUUSDc"
+RESEARCH_SYMBOL: str = "XAUUSD"
 
 MODEL_VERSION: str = "primary_v3_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "sprint19_18feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5_fixed001"
+PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5_fixed001_acct"

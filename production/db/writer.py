@@ -118,7 +118,7 @@ class PostgresWriter:
         )
         """
         payload = dict(row)
-        payload["detail"] = json.dumps(payload.get("detail") or {})
+        payload["detail"] = json.dumps(payload.get("detail") or {}, default=str)
         self._execute(sql, payload)
 
     def insert_execution(self, row: dict[str, Any]) -> None:
@@ -168,7 +168,7 @@ class PostgresWriter:
             {
                 "name": name,
                 "value": value,
-                "labels": json.dumps(labels or {}),
+                "labels": json.dumps(labels or {}, default=str),
                 "correlation_id": correlation_id,
             },
         )
@@ -184,7 +184,7 @@ class PostgresWriter:
                 "correlation_id": correlation_id,
                 "component": component,
                 "action": action,
-                "detail": json.dumps(detail),
+                "detail": json.dumps(detail, default=str),
             },
         )
 
@@ -209,7 +209,8 @@ class PostgresWriter:
         """
         payload = dict(row)
         feats = payload.get("features")
-        payload["features"] = json.dumps(feats) if feats is not None else None
+        # default=str: features may contain pandas Timestamp / numpy scalars
+        payload["features"] = json.dumps(feats, default=str) if feats is not None else None
         self._execute(sql, payload)
 
     def _execute(self, sql: str, params: dict[str, Any]) -> None:

@@ -41,7 +41,7 @@ desktop.ini
 *.log
 
 # --- Blobs ---
-artifacts/
+artifacts/*
 
 # markdown
 ARCHITECTURE.md

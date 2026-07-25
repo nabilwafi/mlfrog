@@ -1,13 +1,17 @@
-"""CLI: Production paper trading runtime (Sprint 27).
+"""CLI: Production paper / live trading runtime.
 
-Frozen research stack. Validates infrastructure under paper fills.
+Modes:
+  replay  — dry replay from heat trades parquet (no MT5)
+  loop    — idle loop + monitoring only
+  paper   — MT5 candles + frozen stack + paper fills  (formerly --mode live)
+  live    — MT5 candles + broker equity + LiveBroker
+            (order_send ONLY when --execute / EXECUTION_ENABLED=True)
 
 Examples:
-  # Dry-run replay from heat trades (no Postgres / Telegram required)
   python apps/run_paper_trading.py --mode replay --max-signals 20
-
-  # Live idle loop with monitoring (needs config)
-  python apps/run_paper_trading.py --mode loop
+  python apps/run_paper_trading.py --mode paper
+  python apps/run_paper_trading.py --mode live            # dry-run orders
+  python apps/run_paper_trading.py --mode live --execute  # REAL orders
 """
 
 from __future__ import annotations
@@ -24,16 +28,22 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Source-stripped packages (feature_engineering, etc.) load from __pycache__ via this hook.
+import tools.pyc_path_hook  # noqa: F401,E402
+
 import yaml
 
+from production import EXECUTION_ENABLED, LIVE_SYMBOL, RESEARCH_SYMBOL, USE_ACCOUNT_EQUITY
 from production.db.writer import PostgresWriter
 from production.events.bus import EventBus, MetricsCollector
+from production.live.account import fetch_account, snapshot_dict, sync_equity_into_state
+from production.live.broker import LiveBroker
+from production.live.signal_source import LiveMT5SignalSource
 from production.logging.structured import setup_json_logging
 from production.monitoring.health import HealthReporter
 from production.monitoring.mt5_probe import make_mt5_probe
 from production.monitoring.mt5_session import disconnect as mt5_disconnect
 from production.monitoring.server import start_monitoring_server
-from production.live.signal_source import LiveMT5SignalSource
 from production.paper.broker import PaperBroker
 from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.runtime import IdleSignalSource, PaperRuntime, ReplaySignalSource
@@ -91,23 +101,6 @@ def _resolve(path: str) -> Path:
     return p if p.is_absolute() else (ROOT / p).resolve()
 
 
-def _lan_ip() -> str:
-    # ponytail: UDP connect trick — no packets sent; fails closed to 127.0.0.1
-    import socket
-
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-
-
-def _monitoring_url(host: str, port: int) -> str:
-    display = _lan_ip() if host in ("0.0.0.0", "::") else host
-    return f"http://{display}:{port}"
-
-
 def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[IncomingSignal]:
     import pandas as pd
 
@@ -151,9 +144,19 @@ def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[Incoming
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Production paper trading (Sprint 27)")
+    p = argparse.ArgumentParser(description="Production paper / live trading")
     p.add_argument("--config", type=Path, default=MT5_CONFIG)
-    p.add_argument("--mode", choices=("replay", "loop", "live"), default="replay")
+    p.add_argument(
+        "--mode",
+        choices=("replay", "loop", "paper", "live"),
+        default="replay",
+        help="paper = MT5+paper fills (old 'live'); live = broker equity + LiveBroker",
+    )
+    p.add_argument(
+        "--execute",
+        action="store_true",
+        help="LIVE ONLY: actually call MT5 order_send (default is dry-run)",
+    )
     p.add_argument("--max-signals", type=int, default=50)
     p.add_argument("--heat-trades", type=Path, default=None)
     p.add_argument("--apply-schema", action="store_true")
@@ -272,12 +275,40 @@ def main(argv: list[str] | None = None) -> int:
         print("schema applied")
 
     state = PortfolioState(equity=starting, peak_equity=starting)
-    env_name = str(paper_cfg.get("environment") or ("live" if args.mode == "live" else "paper"))
+    # paper = old live (MT5 candles + paper fills); live = broker equity + LiveBroker
+    if args.mode == "live":
+        env_name = "live"
+    elif args.mode == "paper":
+        env_name = "paper"
+    else:
+        env_name = str(paper_cfg.get("environment") or "paper")
+
+    do_execute = bool(args.execute) or bool(EXECUTION_ENABLED)
+    # live → HF cent symbol XAUUSDC; paper/replay keep cfg/research symbol
+    trade_symbol = LIVE_SYMBOL if args.mode == "live" else str(cfg.get("symbol", RESEARCH_SYMBOL))
+    if args.mode == "live":
+        broker: PaperBroker | LiveBroker = LiveBroker(
+            symbol=trade_symbol,
+            execution_enabled=do_execute,
+        )
+        if do_execute:
+            log.warning(
+                "LIVE EXECUTION ENABLED — real MT5 order_send ON symbol=%s",
+                trade_symbol,
+            )
+        else:
+            log.warning(
+                "LIVE dry-run symbol=%s — orders logged only (pass --execute to send real)",
+                trade_symbol,
+            )
+    else:
+        broker = PaperBroker()
+
     pipeline = ProductionPipeline(
         bus=bus,
         state=state,
-        broker=PaperBroker(),
-        symbol=str(cfg.get("symbol", "XAUUSD")),
+        broker=broker,
+        symbol=trade_symbol,
         environment=env_name,
     )
     check_mt5 = bool(paper_cfg.get("check_mt5", True))
@@ -320,23 +351,50 @@ def main(argv: list[str] | None = None) -> int:
                 encoding="utf-8",
             )
             print(f"replay done equity={state.equity:.2f} opened_keys={state.trades_today} skips={state.skips}")
-            print(f"monitoring was on {_monitoring_url(mon_host, mon_port)}/metrics")
-        elif args.mode == "live":
-            live_cfg = dict(paper_cfg.get("live") or {})
+            print(f"monitoring was on http://{mon_host}:{mon_port}/metrics")
+        elif args.mode in ("paper", "live"):
+            live_cfg = dict(paper_cfg.get("live") or paper_cfg.get("paper") or {})
             source = LiveMT5SignalSource(
                 cfg,
-                symbol=str(cfg.get("symbol", "XAUUSD")),
+                symbol=trade_symbol,
                 timeframe=str(live_cfg.get("timeframe", cfg.get("timeframe", "H1"))),
                 history_bars=int(live_cfg.get("history_bars", 400)),
+                model_symbol=RESEARCH_SYMBOL if args.mode == "live" else trade_symbol,
             )
+            source.connect()
+            # Sync broker equity before the loop (live always; paper if flag on)
+            if args.mode == "live" or USE_ACCOUNT_EQUITY:
+                try:
+                    snap = fetch_account()
+                    sync_equity_into_state(state, snap)
+                    (PAPER / "last_account_snapshot.json").write_text(
+                        __import__("json").dumps(snapshot_dict(snap), indent=2),
+                        encoding="utf-8",
+                    )
+                    print(
+                        f"account login={snap.login} server={snap.server} "
+                        f"equity=${snap.equity:.2f} balance=${snap.balance:.2f} "
+                        f"lev=1:{snap.leverage:g} free_margin=${snap.free_margin:.2f}"
+                    )
+                except Exception as exc:
+                    log.exception("account_sync_failed err=%s — using starting_equity=%.2f", exc, starting)
+
             runtime = PaperRuntime(
                 pipeline=pipeline,
                 bus=bus,
                 source=source,
                 poll_seconds=float(live_cfg.get("poll_seconds", poll)),
             )
-            print(f"live paper trading on {cfg.get('symbol', 'XAUUSD')} — MT5 candles + frozen stack + paper fills")
-            print(f"monitoring {_monitoring_url(mon_host, mon_port)}/health")
+            if args.mode == "live":
+                print(
+                    f"LIVE on {trade_symbol} (models={RESEARCH_SYMBOL}) — "
+                    f"broker equity + {'REAL order_send' if do_execute else 'DRY-RUN fills'}"
+                )
+            else:
+                print(
+                    f"PAPER on {trade_symbol} — MT5 candles + frozen stack + paper fills"
+                )
+            print(f"monitoring http://{mon_host}:{mon_port}/health")
             runtime.run_forever()
         else:
             runtime = PaperRuntime(
@@ -345,7 +403,7 @@ def main(argv: list[str] | None = None) -> int:
                 source=IdleSignalSource(),
                 poll_seconds=poll,
             )
-            print(f"paper loop listening; monitoring {_monitoring_url(mon_host, mon_port)}/health")
+            print(f"paper loop listening; monitoring http://{mon_host}:{mon_port}/health")
             runtime.run_forever()
     finally:
         health.stop()

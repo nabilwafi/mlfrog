@@ -8,13 +8,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from data.entities.candle import Candle
-from data.entities.market_data import MarketData
-from data.exceptions import ValidationError
-from data.providers.csv_provider import CSVProvider
-from data.providers.parquet_provider import ParquetProvider
-from data.repositories.market_repository import MarketRepository
-from data.validators.candle_validator import CandleValidator
+from mlfrog.data.entities.candle import Candle
+from mlfrog.data.entities.market_data import MarketData
+from mlfrog.data.exceptions import ValidationError
+from mlfrog.data.providers.csv_provider import CSVProvider
+from mlfrog.data.providers.parquet_provider import ParquetProvider
+from mlfrog.data.repositories.market_repository import MarketRepository
+from mlfrog.data.validators.candle_validator import CandleValidator
 
 UTC = ZoneInfo("UTC")
 

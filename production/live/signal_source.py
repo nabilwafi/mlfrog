@@ -54,14 +54,17 @@ class LiveMT5SignalSource:
         symbol: str,
         timeframe: str = "H1",
         history_bars: int = 400,
+        model_symbol: str | None = None,
     ) -> None:
         self._cfg = cfg
-        self._symbol = symbol.upper()
+        # Broker symbol is case-sensitive on HF (XAUUSDc). Model artifact paths use model_symbol.
+        self._symbol = str(symbol)
         self._timeframe = timeframe.upper()
         self._history = int(history_bars)
-        self._feed = MT5CandleFeed(cfg, symbol=symbol)
-        self._features = LiveFeatureBuilder(cfg, symbol=symbol, timezone=str(cfg.get("timezone", "UTC")))
-        self._inference = FrozenStackInference(cfg, symbol=symbol, timeframe=timeframe)
+        ms = str(model_symbol or symbol)
+        self._feed = MT5CandleFeed(cfg, symbol=self._symbol)
+        self._features = LiveFeatureBuilder(cfg, symbol=self._symbol, timezone=str(cfg.get("timezone", "UTC")))
+        self._inference = FrozenStackInference(cfg, symbol=ms, timeframe=timeframe)
         self._last_bar_ts: pd.Timestamp | None = None
 
     def connect(self) -> None:

@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class LiveFeatureBuilder:
     def __init__(self, cfg: dict[str, Any], *, symbol: str, timezone: str = "UTC") -> None:
         self._cfg = cfg
-        self._symbol = symbol.upper()
+        self._symbol = str(symbol)  # preserve broker case (XAUUSDc)
         self._tz = timezone
         fe_cfg = dict(cfg.get("feature_engineering") or {})
         out = fe_cfg.get("output_directory", "./artifacts/features")
