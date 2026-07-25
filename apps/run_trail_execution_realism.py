@@ -9,7 +9,11 @@ def prepare_mkt(h1: pd.DataFrame) -> dict:
     open_ = h["open"].to_numpy(dtype=float)
     ts = h["timestamp"].to_numpy()
     atr = wilder_atr(high, low, close, 14)
-    return {"high": high, "low": low, "close": close, "open": open_, "atr": atr, "ts": ts}"""Realistic execution sim for trail policy (bid/ask, hour-spread, slip, latency, gap, requote).
+    return {"high": high, "low": low, "close": close, "open": open_, "atr": atr, "ts": ts}
+    
+
+
+"""Realistic execution sim for trail policy (bid/ask, hour-spread, slip, latency, gap, requote).
 
 H1 has no ticks — latency/gap/requote are bar-path approximations (documented below).
 """
