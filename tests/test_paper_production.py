@@ -190,13 +190,12 @@ class PipelineTests(unittest.TestCase):
         a = pipe.process_signal(long)
         b = pipe.process_signal(short)
         self.assertEqual(a["status"], "opened")
-        # max_open=1 trips before opposite check
-        self.assertEqual(b["reason"], "max_open")
+        self.assertEqual(b["reason"], "opposite_blocked")
         self.assertEqual(len(state.open_positions), 1)
         bus.stop()
 
     def test_multi_entry_same_side(self) -> None:
-        """Policy lock: max_open=1 — second same-side entry is blocked."""
+        """Sprint 37 parallel: same-side add allowed until heat_budget / max_open."""
         bus = EventBus()
         bus.start(n_workers=1)
         state = PortfolioState(equity=10_000, peak_equity=10_000)
@@ -228,8 +227,36 @@ class PipelineTests(unittest.TestCase):
             )
         )
         self.assertEqual(first["status"], "opened")
-        self.assertEqual(second["reason"], "max_open")
-        self.assertEqual(len(state.open_positions), 1)
+        self.assertEqual(second["status"], "opened")
+        self.assertEqual(len(state.open_positions), 2)
+        bus.stop()
+
+    def test_heat_budget_blocks_fourth_full_slot(self) -> None:
+        """HEAT_BUDGET_R=3 → three full-size (atr_pct low) opens, fourth blocked."""
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        statuses = []
+        for i in range(4):
+            out = pipe.process_signal(
+                IncomingSignal(
+                    timestamp=datetime(2024, 1, 2, 10 + i, tzinfo=timezone.utc),
+                    symbol="XAUUSD",
+                    side="long",
+                    probability=0.6,
+                    meta_probability=0.55,
+                    confidence=55,
+                    entry_price=2000 + i,
+                    atr=4.0,
+                    atr_percentile=0.1,  # risk_mult 1.0
+                    bar_key=f"heat:{i}",
+                )
+            )
+            statuses.append(out.get("status") if out["status"] == "opened" else out.get("reason"))
+        self.assertEqual(statuses[:3], ["opened", "opened", "opened"])
+        self.assertEqual(statuses[3], "heat_budget")
+        self.assertEqual(len(state.open_positions), 3)
         bus.stop()
 
     def test_atr_trail_ratchets_and_exits(self) -> None:

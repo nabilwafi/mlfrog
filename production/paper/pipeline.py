@@ -17,12 +17,15 @@ from production import (
     EXIT_MODE,
     FEATURE_VERSION,
     FIXED_LOT,
+    HEAT_BUDGET_R,
     LABEL_VERSION,
     MAX_OPEN_POSITIONS,
     META_AS_GATE,
     META_THRESHOLD,
     META_VERSION,
     MODEL_VERSION,
+    PARALLEL_COOLDOWN_BARS,
+    PARALLEL_MIN_DISTANCE_ATR,
     PIPELINE_VERSION,
     SIZE_FROM_PRIMARY,
     SIZE_MODE,
@@ -102,7 +105,7 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "duplicate", None, None)
             return {"status": "skipped", "reason": "duplicate", "correlation_id": corr}
 
-        # Multi-entry cap + optional no-opposite
+        # Multi-entry cap + optional no-opposite + parallel filters (Sprint 37)
         n_open = len(self.state.open_positions)
         if n_open >= int(MAX_OPEN_POSITIONS):
             self.state.skips += 1
@@ -116,6 +119,25 @@ class ProductionPipeline:
                 self.state.skips += 1
                 self._skip(corr, signal_id, sig, "opposite_blocked", 1.0, float(n_open))
                 return {"status": "skipped", "reason": "opposite_blocked", "correlation_id": corr}
+
+        if n_open > 0:
+            if int(PARALLEL_COOLDOWN_BARS) > 0:
+                last_t = max(p.entry_time for p in self.state.open_positions.values())
+                hours = (now - last_t).total_seconds() / 3600.0
+                if hours < float(PARALLEL_COOLDOWN_BARS):
+                    self.state.skips += 1
+                    self._skip(corr, signal_id, sig, "cooldown", float(PARALLEL_COOLDOWN_BARS), hours)
+                    return {"status": "skipped", "reason": "cooldown", "correlation_id": corr}
+            if float(PARALLEL_MIN_DISTANCE_ATR) > 0 and sig.atr > 0:
+                min_dist = float(PARALLEL_MIN_DISTANCE_ATR) * float(sig.atr)
+                too_close = any(
+                    abs(float(sig.entry_price) - float(p.entry_price)) < min_dist
+                    for p in self.state.open_positions.values()
+                )
+                if too_close:
+                    self.state.skips += 1
+                    self._skip(corr, signal_id, sig, "min_distance", min_dist, float(sig.entry_price))
+                    return {"status": "skipped", "reason": "min_distance", "correlation_id": corr}
 
         # Publish signal row (accepted TBD)
         base_signal = {
@@ -197,6 +219,16 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "risk", risk_pct, lots)
             return {"status": "skipped", "reason": "risk", "correlation_id": corr}
 
+        # Sprint 37 heat budget: sum(lots/FIXED_LOT) across opens ≤ HEAT_BUDGET_R
+        open_heat = sum(
+            float(p.lot) / max(float(FIXED_LOT), 1e-12) for p in self.state.open_positions.values()
+        )
+        add_heat = float(lots) / max(float(FIXED_LOT), 1e-12)
+        if open_heat + add_heat > float(HEAT_BUDGET_R) + 1e-12:
+            self.state.skips += 1
+            self._skip(corr, signal_id, sig, "heat_budget", float(HEAT_BUDGET_R), open_heat + add_heat)
+            return {"status": "skipped", "reason": "heat_budget", "correlation_id": corr}
+
         side = str(sig.side).lower()
         entry = float(sig.entry_price)
         atr = float(sig.atr)
@@ -270,6 +302,7 @@ class ProductionPipeline:
                 "trail_activate_r": TRAIL_ACTIVATE_R,
                 "atr_percentile": float(sig.atr_percentile),
                 "risk_mult": risk_scale,
+                "heat_slots": add_heat,
                 "edge_score": edge,
                 "initial_sl": sl,
             },

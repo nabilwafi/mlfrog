@@ -1,9 +1,10 @@
 """Production paper/live policy knobs (research-locked stack).
 
-Locked: FEAT7 primary + top 5% + ATR trail a0.25/d0.08 + max_open 1
-+ ATR map_conservative lot scale. All UTC hours (no session gate).
-Finex-style base lot 0.01 × atr risk_mult. No TP / no short time-exit
-(horizon = research CAP 48 when time exit disabled).
+Locked: FEAT7 primary + top 5% + ATR trail a0.25/d0.08
++ ATR map_conservative lot scale
++ Parallel multi-trade max_open=5, dist=0 ATR, cooldown=0, heat_budget=3R.
+All UTC hours (no session gate). Finex-style base lot 0.01 × atr risk_mult.
+No TP / no short time-exit (horizon = research CAP 48).
 """
 
 from __future__ import annotations
@@ -28,11 +29,15 @@ CONFIDENCE_SKIP: float = 40.0
 # Primary density (live rolling percentile gate)
 PRIMARY_TOP_PCT: float = 0.05
 
-# --- Portfolio concurrency ---
-MAX_OPEN_POSITIONS: int = 1
+# --- Portfolio concurrency (Sprint 37 winner: parallel_mo5_d0.0_cd0_h3.0) ---
+MAX_OPEN_POSITIONS: int = 5
 BLOCK_OPPOSITE_SIDE: bool = True
+PARALLEL_MIN_DISTANCE_ATR: float = 0.0  # 0 = no distance filter
+PARALLEL_COOLDOWN_BARS: int = 0  # H1 bars since last entry; 0 = off
+# Heat = sum(lots / FIXED_LOT) across opens; winner budget 3R slots
+HEAT_BUDGET_R: float = 3.0
 
-# --- Heat reference R ---
+# --- Heat reference R (daily loss stop) ---
 RISK_PCT: float = 0.01
 RISK_BASE: float = 0.01
 DAILY_LOSS_STOP_R: float = 1.0
@@ -75,7 +80,7 @@ MODEL_VERSION: str = "primary_feat7_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "fs7_feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v2_feat7_a025_d008_atr_map_cons"
+PIPELINE_VERSION: str = "prod_v3_feat7_a025_d008_atr_par_mo5_h3"
 
 
 def atr_risk_mult(atr_percentile: float) -> float:
