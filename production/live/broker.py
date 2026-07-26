@@ -56,6 +56,56 @@ def _price(symbol: str, side: str, *, closing: bool = False) -> float:
     return float(tick.ask if s == "long" else tick.bid)
 
 
+# Common MT5 retcodes we hit in live — short hint for logs / Telegram
+_RETCODE_HINT: dict[int, str] = {
+    10016: "invalid stops (SL/TP vs stops_level)",
+    10017: "TRADE_DISABLED — AlgoTrading OFF, investor password, or symbol/account trade off",
+    10018: "market closed",
+    10019: "not enough money / margin",
+    10027: "AutoTrading disabled in terminal (toolbar AlgoTrading button)",
+    10030: "unsupported filling mode — try IOC/FOK",
+}
+
+
+def _trade_preflight(symbol: str) -> str | None:
+    """Return a human reason if trading looks blocked before order_send; else None."""
+    import MetaTrader5 as mt5
+
+    term = mt5.terminal_info()
+    acc = mt5.account_info()
+    info = mt5.symbol_info(symbol)
+    reasons: list[str] = []
+    if term is not None and not bool(getattr(term, "trade_allowed", True)):
+        reasons.append("terminal.trade_allowed=False (enable AlgoTrading button)")
+    if acc is not None and not bool(getattr(acc, "trade_allowed", True)):
+        reasons.append("account.trade_allowed=False (broker disabled trading / investor login)")
+    if acc is not None and not bool(getattr(acc, "trade_expert", True)):
+        reasons.append("account.trade_expert=False (EA trading not allowed on account)")
+    if info is None:
+        reasons.append(f"symbol_info({symbol!r}) is None — wrong name or not in Market Watch")
+    else:
+        # SYMBOL_TRADE_MODE_DISABLED = 0
+        mode = int(getattr(info, "trade_mode", -1))
+        if mode == 0:
+            reasons.append(f"{symbol} trade_mode=DISABLED")
+        if not bool(getattr(info, "visible", True)):
+            reasons.append(f"{symbol} not visible in Market Watch")
+    return "; ".join(reasons) if reasons else None
+
+
+def _reject_message(retcode: int, comment: str | None, *, symbol: str) -> str:
+    hint = _RETCODE_HINT.get(int(retcode), "")
+    pre = _trade_preflight(symbol)
+    parts = [f"retcode={retcode}"]
+    if comment:
+        parts.append(str(comment))
+    if hint:
+        parts.append(hint)
+    if pre:
+        parts.append(pre)
+    return " | ".join(parts)
+
+
 class LiveBroker:
     """Real-order broker with hard dry-run default.
 
@@ -156,6 +206,10 @@ class LiveBroker:
         from production.monitoring import mt5_session
 
         mt5_session.select_symbol(self.symbol)
+        blocked = _trade_preflight(self.symbol)
+        if blocked:
+            logger.error("LIVE open BLOCKED trade_id=%s %s", trade_id, blocked)
+            # still attempt order_send — broker is source of truth; preflight only enriches errors
         price = _price(self.symbol, side)
         req: dict[str, Any] = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -176,6 +230,8 @@ class LiveBroker:
         latency = (time.perf_counter() - t0) * 1000
         if result is None:
             err = str(mt5.last_error())
+            if blocked:
+                err = f"{err} | {blocked}"
             logger.error("order_send open failed trade_id=%s err=%s", trade_id, err)
             return FillResult(
                 success=False,
@@ -204,13 +260,10 @@ class LiveBroker:
                 float(result.price or price),
                 lot,
             )
+            err_msg = None
         else:
-            logger.error(
-                "LIVE open REJECT trade_id=%s retcode=%s comment=%s",
-                trade_id,
-                result.retcode,
-                result.comment,
-            )
+            err_msg = _reject_message(int(result.retcode), result.comment, symbol=self.symbol)
+            logger.error("LIVE open REJECT trade_id=%s %s", trade_id, err_msg)
         return FillResult(
             success=ok,
             trade_id=trade_id,
@@ -220,7 +273,7 @@ class LiveBroker:
             latency_ms=latency,
             retry_count=0,
             broker_response=str(result.comment or result.retcode),
-            error_message=None if ok else f"retcode={result.retcode}",
+            error_message=err_msg,
         )
 
     def _send_close(self, *, trade_id: str, ticket: int) -> FillResult:
@@ -276,8 +329,10 @@ class LiveBroker:
         if ok:
             self._tickets.pop(trade_id, None)
             logger.info("LIVE close OK trade_id=%s ticket=%s price=%.2f", trade_id, ticket, float(result.price or price))
+            err_msg = None
         else:
-            logger.error("LIVE close REJECT trade_id=%s retcode=%s", trade_id, result.retcode)
+            err_msg = _reject_message(int(result.retcode), result.comment, symbol=self.symbol)
+            logger.error("LIVE close REJECT trade_id=%s %s", trade_id, err_msg)
         return FillResult(
             success=ok,
             trade_id=trade_id,
@@ -287,7 +342,7 @@ class LiveBroker:
             latency_ms=latency,
             retry_count=0,
             broker_response=str(result.comment or result.retcode),
-            error_message=None if ok else f"retcode={result.retcode}",
+            error_message=err_msg,
         )
 
     @staticmethod

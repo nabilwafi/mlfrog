@@ -37,6 +37,8 @@ class PortfolioState:
     peak_equity: float
     day: date | None = None
     day_start_equity: float = 0.0
+    # Broker balance when synced from MT5; None = paper / not synced
+    balance: float | None = None
     day_pnl: float = 0.0
     heat_triggered_today: int = 0
     open_positions: dict[str, OpenPosition] = field(default_factory=dict)

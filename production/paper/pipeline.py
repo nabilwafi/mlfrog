@@ -478,11 +478,13 @@ class ProductionPipeline:
         if self.state.heat_triggered_today or self.state.equity <= 0:
             status = "degraded"
         report_date = self.state.day.isoformat() if self.state.day else now.date().isoformat()
+        # Prefer broker balance when synced; else day-start equity (paper)
+        bal = self.state.balance
         payload: dict[str, Any] = {
             "date": report_date,
             "symbol": self.symbol,
             "status": status,
-            "balance": start_eq,
+            "balance": float(bal) if bal is not None else start_eq,
             "equity": self.state.equity,
             "daily_r": self.state.day_pnl / max(self.state.r_unit(), 1e-9),
             "drawdown": self.state.drawdown(),
