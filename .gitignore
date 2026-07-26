@@ -41,9 +41,10 @@ desktop.ini
 *.log
 
 # --- Blobs ---
-artifacts/*
+artifacts/
+*.zip
 
-# markdown
+# root domain drafts (canonical docs live under docs/)
 ARCHITECTURE.md
 DOMAIN_MODEL.md
 LIFECYCLE.md

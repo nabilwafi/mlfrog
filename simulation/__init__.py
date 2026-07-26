@@ -1,4 +1,3 @@
-"""Event simulation — rebuild under mlfrog; legacy backtest/ removed."""
+"""Backtest / walk-forward simulation (not live trading)."""
 
-# ponytail: stub until engine is rewritten here
 __all__: list[str] = []
