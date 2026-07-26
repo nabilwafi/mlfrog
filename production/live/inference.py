@@ -1,4 +1,4 @@
-"""Score frozen Primary → Meta → Confidence on one live feature row."""
+"""Score frozen Primary (+ optional Meta/Confidence) on one live feature row."""
 
 from __future__ import annotations
 
@@ -15,9 +15,7 @@ import pandas as pd
 from production import PRIMARY_TOP_PCT
 from production.live.primary_export import ensure_frozen_primary
 from production.paper.market_state import infer_market_state
-from research.confidence_layer.services.confidence import attach_components
 from research.meta_model import FINAL_FEATURES
-from research.model_v2.services.experiment_catalog import LONG_STRUCTURE_CONTEXT, SHORT_STRUCTURE_CONTEXT
 from settings.paths import ROOT
 
 logger = logging.getLogger(__name__)
@@ -47,23 +45,37 @@ class FrozenStackInference:
         self._cfg = cfg
         self._symbol = symbol.upper()
         self._timeframe = timeframe.upper()
+
+        # Meta / confidence are logging-only while gates are off — optional artifacts.
         mm = dict(cfg.get("meta_model") or {})
         meta_root = Path(str(mm.get("output_directory", "./artifacts/research/meta_model")))
         self._meta_root = meta_root if meta_root.is_absolute() else (ROOT / meta_root).resolve()
-        self._meta_model = lgb.Booster(model_file=str(self._meta_root / "models" / "meta_full.txt"))
-        med = pd.read_csv(self._meta_root / "feature_medians.csv", index_col=0)["median"]
-        self._meta_medians = med
+        meta_path = self._meta_root / "models" / "meta_full.txt"
+        med_path = self._meta_root / "feature_medians.csv"
+        self._meta_model: lgb.Booster | None = None
+        self._meta_medians: pd.Series | None = None
         self._meta_features = list(FINAL_FEATURES)
+        if meta_path.is_file() and med_path.is_file():
+            self._meta_model = lgb.Booster(model_file=str(meta_path))
+            self._meta_medians = pd.read_csv(med_path, index_col=0)["median"]
+        else:
+            logger.warning("meta_model_missing path=%s — using primary prob as meta", meta_path)
 
-        conf_root = Path(str((cfg.get("confidence_layer") or {}).get("output_directory", "./artifacts/research/confidence_layer")))
+        conf_root = Path(
+            str((cfg.get("confidence_layer") or {}).get("output_directory", "./artifacts/research/confidence_layer"))
+        )
         self._conf_root = conf_root if conf_root.is_absolute() else (ROOT / conf_root).resolve()
-        weights = pd.read_csv(self._conf_root / "confidence_weights.csv")
-        self._conf_coef = {str(r["component"]): float(r["coef_mean"]) for _, r in weights.iterrows()}
+        weights_path = self._conf_root / "confidence_weights.csv"
+        self._conf_coef: dict[str, float] = {}
+        if weights_path.is_file():
+            weights = pd.read_csv(weights_path)
+            self._conf_coef = {str(r["component"]): float(r["coef_mean"]) for _, r in weights.iterrows()}
+        else:
+            logger.warning("confidence_weights_missing path=%s — confidence=50", weights_path)
 
         self._primary: dict[str, lgb.Booster] = {}
         self._primary_features: dict[str, list[str]] = {}
         self._prob_history: dict[str, deque[float]] = {"long": deque(maxlen=500), "short": deque(maxlen=500)}
-        # Prefer production policy top-pct; allow cfg.production.primary_top_pct override.
         prod_cfg = dict(cfg.get("production") or {})
         self._percentile = float(prod_cfg.get("primary_top_pct", PRIMARY_TOP_PCT))
 
@@ -76,9 +88,6 @@ class FrozenStackInference:
         self._primary[side] = booster
         self._primary_features[side] = list(booster.feature_name())
         return booster
-
-    def _context_cols(self, side: str) -> tuple[str, ...]:
-        return LONG_STRUCTURE_CONTEXT if side.lower() == "long" else SHORT_STRUCTURE_CONTEXT
 
     def _session_label(self, row: pd.Series) -> str:
         if float(row.get("session_london_ny_overlap", 0) or 0) >= 0.5:
@@ -99,7 +108,9 @@ class FrozenStackInference:
         cutoff = float(np.percentile(list(hist), 100.0 * (1.0 - self._percentile)))
         return prob >= cutoff
 
-    def _meta_row(self, row: pd.Series, *, side: str, raw_prob: float) -> pd.Series:
+    def _meta_prob(self, row: pd.Series, *, side: str, raw_prob: float) -> float:
+        if self._meta_model is None or self._meta_medians is None:
+            return float(raw_prob)
         out = row.copy()
         out["raw_probability"] = raw_prob
         hist = list(self._prob_history[side.lower()])
@@ -108,9 +119,13 @@ class FrozenStackInference:
         out["probability_margin"] = raw_prob - (min(hist) if hist else raw_prob)
         x = pd.DataFrame([{f: float(out.get(f, np.nan)) for f in self._meta_features}])
         x = x.fillna(self._meta_medians)
-        return x.iloc[0]
+        return float(self._meta_model.predict(x[self._meta_features].astype(float))[0])
 
     def _confidence(self, row: pd.Series, *, side: str, raw_prob: float, meta_prob: float) -> float:
+        if not self._conf_coef:
+            return 50.0
+        from research.confidence_layer.services.confidence import attach_components
+
         frame = pd.DataFrame([dict(row)])
         frame["side"] = side
         frame["meta_proba"] = meta_prob
@@ -138,8 +153,7 @@ class FrozenStackInference:
         raw_prob = float(booster.predict(row[feats].astype(float).to_frame().T)[0])
         if not self._candidate_gate(side_l, raw_prob):
             return None
-        meta_x = self._meta_row(row, side=side_l, raw_prob=raw_prob)
-        meta_prob = float(self._meta_model.predict(meta_x[self._meta_features].astype(float).to_frame().T)[0])
+        meta_prob = self._meta_prob(row, side=side_l, raw_prob=raw_prob)
         conf = self._confidence(row, side=side_l, raw_prob=raw_prob, meta_prob=meta_prob)
         ts = pd.Timestamp(row["timestamp"])
         if ts.tzinfo is None:
