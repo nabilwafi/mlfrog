@@ -40,6 +40,14 @@ python apps/run_rolling_walkforward.py --debug-files
 python apps/audit_rolling_walkforward.py --run-id <run_id>
 ```
 
+Attribution report from stored DB results (no retrain / no re-backtest):
+
+```bash
+python apps/report_performance_attribution.py
+python apps/report_edge_attribution.py
+python apps/report_feature_library_research.py
+```
+
 Schema: `sql/research_wf_schema.sql` → `research.wf_*`  
 Debug panels: `artifacts/pipeline_backtest/rolling_wf/`
 

@@ -84,6 +84,7 @@ def replay_trail(*, side: str, entry: float, atr: float, ei: int, mkt: dict, tra
         return None
     is_long = side == "long"
     one_r = SL_ATR * atr
+    r_unit_pct = one_r / entry
     sl = entry - SL_ATR * atr if is_long else entry + SL_ATR * atr
     init_sl = sl
     extreme = entry
@@ -91,16 +92,22 @@ def replay_trail(*, side: str, entry: float, atr: float, ei: int, mkt: dict, tra
     exit_px = float(close[hard])
     j_exit = hard
     reason = "TIMEOUT"
+    best_fav = 0.0
+    worst_adv = 0.0
     for j in range(ei + 1, hard + 1):
         h, l, c = float(high[j]), float(low[j]), float(close[j])
         atr_j = float(atr_s[j]) if np.isfinite(atr_s[j]) else atr
         if is_long:
             extreme = max(extreme, h)
+            best_fav = max(best_fav, (h - entry) / entry)
+            worst_adv = max(worst_adv, (entry - l) / entry)
             if (extreme - entry) >= ACTIVATE_R * one_r:
                 sl = max(sl, extreme - trail * atr_j)
             hit_sl = l <= sl
         else:
             extreme = min(extreme, l)
+            best_fav = max(best_fav, (entry - l) / entry)
+            worst_adv = max(worst_adv, (h - entry) / entry)
             if (entry - extreme) >= ACTIVATE_R * one_r:
                 sl = min(sl, extreme + trail * atr_j)
             hit_sl = h >= sl
@@ -109,11 +116,32 @@ def replay_trail(*, side: str, entry: float, atr: float, ei: int, mkt: dict, tra
             reason = "TRAIL" if abs(sl - init_sl) > 1e-9 else "SL"
             j_exit = j
             break
+    net = float(_signed(side, entry, exit_px) - COST)
     return {
-        "net_return": float(_signed(side, entry, exit_px) - COST),
+        "net_return": net,
         "holding_bars": int(j_exit - ei),
         "exit_reason": reason,
+        "mfe_pct": float(best_fav),
+        "mae_pct": float(worst_adv),
+        "mfe_r": float(best_fav / r_unit_pct) if r_unit_pct > 0 else float("nan"),
+        "mae_r": float(worst_adv / r_unit_pct) if r_unit_pct > 0 else float("nan"),
+        "r_multiple": float(net / r_unit_pct) if r_unit_pct > 0 else float("nan"),
+        "r_unit_pct": float(r_unit_pct),
     }
+
+
+def regime_thresholds(trend_vol: pd.DataFrame) -> tuple[float, float]:
+    """Tercile cutpoints for ctx_h4_volatility_regime (shared across a run)."""
+    vol = trend_vol["ctx_h4_volatility_regime"].astype(float)
+    lo, hi = vol.quantile([1 / 3, 2 / 3])
+    return float(lo), float(hi)
+
+
+def label_regime(trend: float, vol: float, *, vol_lo: float, vol_hi: float) -> tuple[str, str, str]:
+    trend_state = "UPTREND" if trend > 0.33 else ("DOWNTREND" if trend < -0.33 else "RANGE")
+    vol_state = "LOW_VOL" if vol <= vol_lo else ("HIGH_VOL" if vol >= vol_hi else "MID_VOL")
+    return trend_state, vol_state, f"{trend_state} / {vol_state}"
+
 
 
 def _load_side(side: str) -> pd.DataFrame:

@@ -16,6 +16,7 @@ Examples:
   python apps/run_rolling_walkforward.py --apply-schema
   python apps/run_rolling_walkforward.py
   python apps/run_rolling_walkforward.py --starting 80 --debug-files
+  python apps/run_rolling_walkforward.py --keep-history   # keep old research.wf_* runs
 """
 
 from __future__ import annotations
@@ -55,10 +56,12 @@ from simulation.wf.sim import (
     _feat_names,
     _load_side,
     entry_indices,
+    label_regime,
     load_h1,
     max_dd_from_equity,
     prepare_market,
     profit_factor_pnl,
+    regime_thresholds,
     replay_trail,
     run_portfolio,
     wilder_atr,
@@ -183,6 +186,8 @@ def build_test_entries(
     window: WFWindow,
     boosters: dict[str, lgb.Booster],
     top_pct: float = TOP_PCT,
+    vol_lo: float = 0.0,
+    vol_hi: float = 1.0,
 ) -> pd.DataFrame:
     """Score frozen models on test year only; top_pct unique bars (best side)."""
     rows = []
@@ -191,7 +196,11 @@ def build_test_entries(
         if test.empty or side not in boosters:
             continue
         prob = score_test(boosters[side], test, feat)
-        g = test[["timestamp", "realized_return", "holding_bars", "entry_price"]].copy()
+        keep = ["timestamp", "realized_return", "holding_bars", "entry_price"]
+        for c in ("ctx_h4_trend_direction", "ctx_h4_volatility_regime"):
+            if c in test.columns:
+                keep.append(c)
+        g = test[keep].copy()
         g["side"] = side
         g["y_prob"] = prob
         rows.append(g)
@@ -208,6 +217,18 @@ def build_test_entries(
     m["entry_price"] = m["entry_price"].fillna(m["close"]).astype(float)
     m["atr_price"] = m["atr"].astype(float)
     m["atr_entry"] = m["atr_price"]
+    if "ctx_h4_trend_direction" in m.columns and "ctx_h4_volatility_regime" in m.columns:
+        labels = [
+            label_regime(float(t), float(v), vol_lo=vol_lo, vol_hi=vol_hi)
+            for t, v in zip(m["ctx_h4_trend_direction"], m["ctx_h4_volatility_regime"])
+        ]
+        m["trend_state"] = [x[0] for x in labels]
+        m["vol_state"] = [x[1] for x in labels]
+        m["regime"] = [x[2] for x in labels]
+    else:
+        m["trend_state"] = "UNKNOWN"
+        m["vol_state"] = "UNKNOWN"
+        m["regime"] = "UNKNOWN"
     return m.dropna(subset=["entry_price", "atr_price"])
 
 
@@ -238,6 +259,14 @@ def apply_trail(entries: pd.DataFrame, mkt: dict) -> pd.DataFrame:
                 "net_return": r["net_return"],
                 "holding_bars": r["holding_bars"],
                 "exit_reason": r["exit_reason"],
+                "regime": str(src.get("regime", "UNKNOWN")),
+                "trend_state": str(src.get("trend_state", "UNKNOWN")),
+                "vol_state": str(src.get("vol_state", "UNKNOWN")),
+                "mfe_pct": float(r["mfe_pct"]),
+                "mae_pct": float(r["mae_pct"]),
+                "mfe_r": float(r["mfe_r"]),
+                "mae_r": float(r["mae_r"]),
+                "r_multiple": float(r["r_multiple"]),
             }
         )
     return pd.DataFrame(rows)
@@ -262,6 +291,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--leverage", type=float, default=500.0)
     p.add_argument("--apply-schema", action="store_true")
     p.add_argument("--no-db", action="store_true", help="Skip Postgres writes (debug only)")
+    p.add_argument(
+        "--keep-history",
+        action="store_true",
+        help="Keep previous research.wf_* runs (default: wipe all old runs, then write this one)",
+    )
     p.add_argument("--debug-files", action="store_true", help="Also write debug parquet/md")
     p.add_argument("--run-id", type=str, default=None)
     return p
@@ -316,6 +350,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("db=OFF — results will NOT be persisted to Postgres")
 
+    # Default: one canonical run in DB. Old history only if --keep-history.
+    if db.enabled and not args.keep_history:
+        n_old = db.wipe_all_runs()
+        if n_old:
+            print(f"db fresh: wiped {n_old} previous run(s)")
+
     db.upsert_run(
         {
             "run_id": run_id,
@@ -341,7 +381,11 @@ def main(argv: list[str] | None = None) -> int:
     feat = _feat_names(long_df)
     h1 = load_h1(_ROOT / "artifacts/raw/XAUUSD/H1/data.parquet")
     mkt = prepare_market(h1)
-    print(f"features={len(feat)} long_rows={len(long_df)} short_rows={len(short_df)}")
+    vol_lo, vol_hi = regime_thresholds(long_df)
+    print(
+        f"features={len(feat)} long_rows={len(long_df)} short_rows={len(short_df)} "
+        f"vol_terciles=({vol_lo:.3f},{vol_hi:.3f})"
+    )
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     if args.debug_files:
@@ -414,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
                 window=w,
                 boosters=boosters,
                 top_pct=args.top_pct,
+                vol_lo=vol_lo,
+                vol_hi=vol_hi,
             )
             # Leakage guard on scored panel.
             if not entries.empty:
@@ -427,11 +473,26 @@ def main(argv: list[str] | None = None) -> int:
                 ruin_stop=True,
                 leverage=float(args.leverage),
             )
-            # Enrich traded with signal fields for DB.
+            # Enrich traded with signal + attribution fields for DB.
             if not traded.empty and not panel.empty:
-                # merge on timestamp+side (max_open=1 so unique enough)
+                enrich_cols = [
+                    "timestamp",
+                    "side",
+                    "y_prob",
+                    "entry_price",
+                    "net_return",
+                    "exit_reason",
+                    "regime",
+                    "trend_state",
+                    "vol_state",
+                    "mfe_pct",
+                    "mae_pct",
+                    "mfe_r",
+                    "mae_r",
+                    "r_multiple",
+                ]
                 traded = traded.merge(
-                    panel[["timestamp", "side", "y_prob", "entry_price", "net_return", "exit_reason"]],
+                    panel[enrich_cols],
                     on=["timestamp", "side"],
                     how="left",
                     suffixes=("", "_p"),
@@ -488,6 +549,14 @@ def main(argv: list[str] | None = None) -> int:
                             "equity": float(r.equity),
                             "holding_bars": int(r.holding_bars),
                             "exit_reason": str(getattr(r, "exit_reason", "") or ""),
+                            "regime": str(getattr(r, "regime", "") or "UNKNOWN"),
+                            "trend_state": str(getattr(r, "trend_state", "") or "UNKNOWN"),
+                            "vol_state": str(getattr(r, "vol_state", "") or "UNKNOWN"),
+                            "mfe_pct": float(getattr(r, "mfe_pct", float("nan"))),
+                            "mae_pct": float(getattr(r, "mae_pct", float("nan"))),
+                            "mfe_r": float(getattr(r, "mfe_r", float("nan"))),
+                            "mae_r": float(getattr(r, "mae_r", float("nan"))),
+                            "r_multiple": float(getattr(r, "r_multiple", float("nan"))),
                         }
                     )
                     equity_rows.append(

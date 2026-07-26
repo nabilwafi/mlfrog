@@ -1,7 +1,7 @@
 """Production paper/live policy knobs (locked exit-engine path).
 
 Locked: Primary top 5% + ATR trail 0.12 + max_open 1.
-Session gate OFF (all UTC hours). Finex-style fixed lot 0.01.
+All UTC hours (no session gate). Finex-style fixed lot 0.01.
 """
 
 from __future__ import annotations
@@ -14,11 +14,6 @@ CONFIDENCE_SKIP: float = 40.0
 
 # Primary density (live rolling percentile gate)
 PRIMARY_TOP_PCT: float = 0.05
-
-# Session gate (UTC hour inclusive). Off = trade all hours.
-SESSION_HOUR_START_UTC: int = 9
-SESSION_HOUR_END_UTC: int = 15
-SESSION_GATE_ENABLED: bool = False
 
 # --- Portfolio concurrency ---
 MAX_OPEN_POSITIONS: int = 1
@@ -62,4 +57,4 @@ MODEL_VERSION: str = "primary_v3_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "sprint19_18feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v1_trail012_allsess_top5_fixed001_acct"
+PIPELINE_VERSION: str = "prod_v1_trail012_top5_fixed001_acct"

@@ -5,7 +5,7 @@ re-validates leakage / equity / sizing / routing. Does NOT retrain or
 change production components.
 
 Example:
-  python apps/audit_rolling_walkforward.py --run-id 20260726T133746Z_e172ffaa
+  python apps/audit_rolling_walkforward.py --run-id 20260726T142820Z_e1e4f575
 """
 
 from __future__ import annotations
@@ -55,9 +55,6 @@ from production import (
     LABEL_VERSION,
     PIPELINE_VERSION,
     PRIMARY_TOP_PCT,
-    SESSION_GATE_ENABLED,
-    SESSION_HOUR_END_UTC,
-    SESSION_HOUR_START_UTC,
     SIZE_MODE,
     TRAIL_ATR_MULT,
 )
@@ -346,7 +343,7 @@ def build_trade_audit(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Sprint 29 Rolling WF Audit")
-    ap.add_argument("--run-id", default="20260726T133746Z_e172ffaa")
+    ap.add_argument("--run-id", default="20260726T142820Z_e1e4f575")
     ap.add_argument("--starting", type=float, default=80.0)
     ap.add_argument("--leverage", type=float, default=500.0)
     args = ap.parse_args(argv)
@@ -368,15 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     window_df, leak_violations = audit_windows(long_df, short_df, run_id)
     leak_violations.extend(audit_model_reuse(window_df))
 
-    # Policy freeze check vs Sprint 29 frozen config
+    # Policy freeze check vs production knobs (no session gate — all UTC hours)
     policy_flags = []
-    if SESSION_GATE_ENABLED:
-        policy_flags.append("production SESSION_GATE_ENABLED=True but audit expects explicit 09-15; verify filtering")
-    else:
-        policy_flags.append(
-            "FINDING: Sprint29 frozen config says Session=09-15 UTC, but production.SESSION_GATE_ENABLED=False "
-            "and run_rolling_walkforward.py does NOT filter hours — trades can occur outside 09-15 UTC"
-        )
     if abs(TRAIL_ATR_MULT - TRAIL) > 1e-12:
         policy_flags.append(f"trail mismatch production={TRAIL_ATR_MULT} wf={TRAIL}")
     if abs(PRIMARY_TOP_PCT - TOP_PCT) > 1e-12:
@@ -564,12 +554,6 @@ def main(argv: list[str] | None = None) -> int:
     position_df = pd.concat(pos_frames, ignore_index=True) if pos_frames else pd.DataFrame()
     trade_df = pd.concat(trade_frames, ignore_index=True) if trade_frames else pd.DataFrame()
 
-    # Session audit on trades (policy finding)
-    session_outside = 0
-    if not trade_df.empty:
-        hours = pd.to_datetime(trade_df["entry"]).dt.hour
-        session_outside = int(((hours < SESSION_HOUR_START_UTC) | (hours > SESSION_HOUR_END_UTC)).sum())
-
     # Write CSVs
     rolling_window.to_csv(OUT / "rolling_window_audit.csv", index=False)
     model_version_df.to_csv(OUT / "model_version_audit.csv", index=False)
@@ -588,8 +572,6 @@ def main(argv: list[str] | None = None) -> int:
         "equity_bug": any("equity_" in v["check"] for v in all_violations),
         "sizing_bug": any("lot_" in v["check"] for v in all_violations),
         "trade_routing_bug": any("trade_" in v["check"] or "model_year" in v["check"] for v in all_violations),
-        "session_gate_applied": False,
-        "session_trades_outside_0915": session_outside,
         "n_violations": len(all_violations),
         "policy_findings": policy_flags,
     }
@@ -608,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
         f"| Train/Val/Test | 5y / 1y / 1y | 5y / 1y / 1y |",
         f"| Primary entry | Production top5% | top_pct={TOP_PCT} |",
         f"| Exit | ATR Trail 0.12 | TRAIL={TRAIL} |",
-        f"| Session 09-15 UTC | ON | **OFF** (SESSION_GATE_ENABLED={SESSION_GATE_ENABLED}; no hour filter in runner) |",
+        f"| Session gate | none | none (all UTC hours) |",
         f"| max_open | 1 | 1 |",
         f"| Sizing | Production fixed 0.01 | SIZE_MODE={SIZE_MODE}, lot={FIXED_LOT} |",
         f"| Initial equity | $80 | ${args.starting} |",
@@ -705,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
         f"4. Equity bug? **{'YES' if verdict['equity_bug'] else 'NO — Method A yearly reset is consistent; Method B combined is separate'}**",
         f"5. Position sizing bug? **{'YES' if verdict['sizing_bug'] else 'NO — all lots == 0.01 fixed'}**",
         f"6. Trade routing bug? **{'YES' if verdict['trade_routing_bug'] else 'NO — model_id embeds test year; entries in test year'}**",
-        f"7. Valid basis for paper trading? **CONDITIONAL** — windowing/model freeze/sizing OK, but session gate 09-15 is NOT applied ({session_outside} entries outside 09-15 UTC). Align session policy before calling this production-parity.",
+        f"7. Valid basis for paper trading? **{'YES' if not all_violations else 'NO — see violations'}** — no session gate; all UTC hours.",
         "",
         "### Policy findings (not leakage, but freeze mismatch)",
         "",

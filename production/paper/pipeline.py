@@ -24,9 +24,6 @@ from production import (
     META_VERSION,
     MODEL_VERSION,
     PIPELINE_VERSION,
-    SESSION_GATE_ENABLED,
-    SESSION_HOUR_END_UTC,
-    SESSION_HOUR_START_UTC,
     SIZE_FROM_PRIMARY,
     SIZE_MODE,
     TRAIL_ACTIVATE_R,
@@ -101,14 +98,6 @@ class ProductionPipeline:
         if not self.state.register_signal_key(dup_key):
             self._skip(corr, signal_id, sig, "duplicate", None, None)
             return {"status": "skipped", "reason": "duplicate", "correlation_id": corr}
-
-        # Session gate (UTC hour inclusive) — disabled when SESSION_GATE_ENABLED=False
-        if SESSION_GATE_ENABLED:
-            hour = int(now.astimezone(timezone.utc).hour)
-            if hour < int(SESSION_HOUR_START_UTC) or hour > int(SESSION_HOUR_END_UTC):
-                self.state.skips += 1
-                self._skip(corr, signal_id, sig, "session", float(SESSION_HOUR_START_UTC), float(hour))
-                return {"status": "skipped", "reason": "session", "correlation_id": corr}
 
         # Multi-entry cap + optional no-opposite
         n_open = len(self.state.open_positions)
