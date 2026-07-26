@@ -72,8 +72,14 @@ def fetch_account(*, leverage_fallback: float = ACCOUNT_LEVERAGE_FALLBACK) -> Ac
 
 def sync_equity_into_state(state: Any, snap: AccountSnapshot) -> None:
     """Overwrite paper portfolio equity with broker equity (risk/heat use real money)."""
+    prev_eq = float(getattr(state, "equity", 0) or 0)
     state.equity = float(snap.equity)
     state.peak_equity = max(float(getattr(state, "peak_equity", 0) or 0), float(snap.equity))
+    state.balance = float(snap.balance)
+    # day_start was set from config starting_equity before sync — refresh if still stale
+    day_start = float(getattr(state, "day_start_equity", 0) or 0)
+    if day_start <= 0 or abs(day_start - prev_eq) < 1e-9:
+        state.day_start_equity = float(snap.equity)
     logger.info(
         "account_synced login=%s server=%s equity=%.2f balance=%.2f "
         "free_margin=%.2f leverage=1:%g trade_allowed=%s",
