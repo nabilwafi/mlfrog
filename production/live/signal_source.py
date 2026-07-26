@@ -187,6 +187,7 @@ def _to_incoming(scored: ScoredSignal, *, symbol: str) -> IncomingSignal:
         confidence=scored.confidence,
         entry_price=scored.entry_price,
         atr=scored.atr,
+        atr_percentile=float(scored.atr_percentile),
         session=scored.session,
         regime=scored.regime,
         trend=scored.trend,

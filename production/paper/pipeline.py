@@ -26,8 +26,10 @@ from production import (
     PIPELINE_VERSION,
     SIZE_FROM_PRIMARY,
     SIZE_MODE,
+    TAKE_PROFIT_ENABLED,
     TRAIL_ACTIVATE_R,
     TRAIL_ATR_MULT,
+    atr_risk_mult,
 )
 from production.events.bus import EventBus
 from production.events.types import EventType, make_event
@@ -52,6 +54,7 @@ class IncomingSignal:
     confidence: float
     entry_price: float
     atr: float
+    atr_percentile: float = 0.0  # atr_percentile_252; 0 → risk_mult 100%
     session: str = "unknown"
     regime: str = "unknown"
     trend: str = "unknown"
@@ -177,15 +180,16 @@ class ProductionPipeline:
             self._skip(corr, signal_id, sig, "risk", risk_pct, self.state.equity)
             return {"status": "skipped", "reason": "risk", "correlation_id": corr}
 
+        risk_scale = atr_risk_mult(float(sig.atr_percentile))
         if str(SIZE_MODE).lower() == "fixed":
-            lots = float(FIXED_LOT)
+            lots = float(FIXED_LOT) * risk_scale
         else:
             lots = _lots_from_equity(
                 self.state.equity,
                 float(sig.atr),
                 mode="risk",
                 fixed_lots=None,
-                risk_pct=risk_pct,
+                risk_pct=risk_pct * risk_scale,
                 enforce_volume_min=True,
             )
         if lots <= 0:
@@ -198,10 +202,10 @@ class ProductionPipeline:
         atr = float(sig.atr)
         if side == "long":
             sl = entry - SL_ATR_MULT * atr
-            tp = entry + TP_ATR_MULT * atr
+            tp = (entry + TP_ATR_MULT * atr) if TAKE_PROFIT_ENABLED else 0.0
         else:
             sl = entry + SL_ATR_MULT * atr
-            tp = entry - TP_ATR_MULT * atr
+            tp = (entry - TP_ATR_MULT * atr) if TAKE_PROFIT_ENABLED else 0.0
 
         # --- SYNC broker only ---
         t_br0 = time.perf_counter()
@@ -264,6 +268,8 @@ class ProductionPipeline:
                 "exit_mode": EXIT_MODE,
                 "trail_atr_mult": TRAIL_ATR_MULT,
                 "trail_activate_r": TRAIL_ACTIVATE_R,
+                "atr_percentile": float(sig.atr_percentile),
+                "risk_mult": risk_scale,
                 "edge_score": edge,
                 "initial_sl": sl,
             },
@@ -381,7 +387,10 @@ class ProductionPipeline:
                 )
 
             hit_sl = (low <= pos.stop_loss) if pos.side == "long" else (high >= pos.stop_loss)
-            hit_tp = (high >= pos.take_profit) if pos.side == "long" else (low <= pos.take_profit)
+            tp_on = float(pos.take_profit) > 0
+            hit_tp = tp_on and (
+                (high >= pos.take_profit) if pos.side == "long" else (low <= pos.take_profit)
+            )
             reason = None
             exit_px = close
             if hit_sl and hit_tp:

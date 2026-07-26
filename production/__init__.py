@@ -1,10 +1,23 @@
-"""Production paper/live policy knobs (locked exit-engine path).
+"""Production paper/live policy knobs (research-locked stack).
 
-Locked: Primary top 5% + ATR trail 0.12 + max_open 1.
-All UTC hours (no session gate). Finex-style fixed lot 0.01.
+Locked: FEAT7 primary + top 5% + ATR trail a0.25/d0.08 + max_open 1
++ ATR map_conservative lot scale. All UTC hours (no session gate).
+Finex-style base lot 0.01 × atr risk_mult. No TP / no short time-exit
+(horizon = research CAP 48 when time exit disabled).
 """
 
 from __future__ import annotations
+
+# Canonical FS forward-selection order (LGBM determinism).
+PRIMARY_FEATURES: tuple[str, ...] = (
+    "hour_cos",
+    "atr_percentile_252",
+    "ema_trend_duration",
+    "rolling_quantile",
+    "hour_sin",
+    "atr_percent",
+    "ctx_h4_swing_quality",
+)
 
 # --- Gates ---
 META_AS_GATE: bool = False
@@ -24,20 +37,25 @@ RISK_PCT: float = 0.01
 RISK_BASE: float = 0.01
 DAILY_LOSS_STOP_R: float = 1.0
 
-# --- Sizing: Finex-style fixed lot (paper/live micro) ---
+# --- Sizing: Finex-style fixed lot × ATR percentile map_conservative ---
 SIZE_FROM_PRIMARY: bool = True  # still used for logging edge / expected_r
 SIZE_MODE: str = "fixed"  # fixed | risk
 FIXED_LOT: float = 0.01
 EXPECTED_R_REF: float = 0.25
 RISK_MIN: float = 0.0025
 RISK_MAX: float = 0.015
+ATR_RISK_ENABLED: bool = True
+# atr_pct edges → risk_mult buckets (Sprint 35 map_conservative)
+ATR_RISK_EDGES: tuple[float, ...] = (0.30, 0.60, 0.80, 0.90)
+ATR_RISK_MULTS: tuple[float, ...] = (1.0, 0.70, 0.40, 0.25, 0.10)
 
-# --- Exit engine (ATR trail; initial TP/SL still from settings.strategy) ---
+# --- Exit engine (ATR trail; research a0.25_d0.08, TP off) ---
 EXIT_MODE: str = "atr_trail"  # atr_trail | barrier
-TRAIL_ATR_MULT: float = 0.12
-TRAIL_ACTIVATE_R: float = 0.5  # activate after +0.5R (R = SL_ATR * atr)
-EXIT_HORIZON_BARS: int = 16
-TRAIL_HORIZON: int = 16  # alias used by older call sites
+TRAIL_ATR_MULT: float = 0.08
+TRAIL_ACTIVATE_R: float = 0.25  # activate after +0.25R (R = SL_ATR * atr)
+TAKE_PROFIT_ENABLED: bool = False
+EXIT_HORIZON_BARS: int = 48  # research CAP when time exit disabled
+TRAIL_HORIZON: int = 48  # alias used by older call sites
 SL_ATR_MULT: float = 1.5
 
 # --- Account sync (MT5 account_info) ---
@@ -53,8 +71,23 @@ EXECUTION_ENABLED: bool = False  # dry-run by default; set True to send real ord
 LIVE_SYMBOL: str = "XAUUSDc"
 RESEARCH_SYMBOL: str = "XAUUSD"
 
-MODEL_VERSION: str = "primary_v3_frozen"
+MODEL_VERSION: str = "primary_feat7_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
-FEATURE_VERSION: str = "sprint19_18feat"
+FEATURE_VERSION: str = "fs7_feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v1_trail012_top5_fixed001_acct"
+PIPELINE_VERSION: str = "prod_v2_feat7_a025_d008_atr_map_cons"
+
+
+def atr_risk_mult(atr_percentile: float) -> float:
+    """Sprint 35 map_conservative: atr_percentile_252 → lot multiplier."""
+    if not ATR_RISK_ENABLED:
+        return 1.0
+    p = float(atr_percentile)
+    if not (p == p):  # NaN
+        return 1.0
+    edges = ATR_RISK_EDGES
+    risks = ATR_RISK_MULTS
+    for i, e in enumerate(edges):
+        if p <= e:
+            return float(risks[i])
+    return float(risks[-1])

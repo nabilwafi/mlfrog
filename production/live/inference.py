@@ -35,6 +35,7 @@ class ScoredSignal:
     session: str
     regime: str
     bar_key: str
+    atr_percentile: float = 0.0
     trend: str = "unknown"
     volatility: str = "unknown"
     momentum: str = "unknown"
@@ -144,6 +145,7 @@ class FrozenStackInference:
         if ts.tzinfo is None:
             ts = ts.tz_localize("UTC")
         ms = infer_market_state(row)
+        atr_pct = float(row.get("atr_percentile_252", 0.0) or 0.0)
         return ScoredSignal(
             side=side_l,
             timestamp=ts,
@@ -154,6 +156,7 @@ class FrozenStackInference:
             confidence=conf,
             session=ms.session if ms.session != "unknown" else self._session_label(row),
             regime=ms.regime_raw,
+            atr_percentile=atr_pct,
             trend=ms.trend,
             volatility=ms.volatility,
             momentum=ms.momentum,

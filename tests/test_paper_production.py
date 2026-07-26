@@ -233,12 +233,12 @@ class PipelineTests(unittest.TestCase):
         bus.stop()
 
     def test_atr_trail_ratchets_and_exits(self) -> None:
-        """After +0.5R, trail SL tightens; pullback hits TRAIL."""
+        """After +0.25R, trail SL tightens; pullback hits TRAIL."""
         bus = EventBus()
         bus.start(n_workers=1)
         state = PortfolioState(equity=10_000, peak_equity=10_000)
         pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
-        # atr=4, SL_ATR=1.5 → 1R=6; 0.5R=3 → need high >= 2003 to arm trail
+        # atr=4, SL_ATR=1.5 → 1R=6; 0.25R=1.5 → need high >= 2001.5 to arm trail
         out = pipe.process_signal(
             IncomingSignal(
                 timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
@@ -254,8 +254,8 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertEqual(out["status"], "opened")
         tid = out["trade_id"]
-        # arm trail without touching it: high=2004, low stays above trail SL (~2003.52)
-        pipe.on_bar(high=2004, low=2003.6, close=2003.8, timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc))
+        # arm trail; keep low above trail SL (high - 0.08*atr = 2004 - 0.32 = 2003.68)
+        pipe.on_bar(high=2004, low=2003.75, close=2003.8, timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc))
         self.assertIn(tid, state.open_positions)
         self.assertGreater(state.open_positions[tid].stop_loss, 2000 - 1.5 * 4)
         # pullback through trail SL
@@ -265,6 +265,60 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(len(closed) >= 1)
         self.assertEqual(closed[0]["exit_reason"], "TRAIL")
         self.assertNotIn(tid, state.open_positions)
+        bus.stop()
+
+    def test_atr_risk_scales_fixed_lot(self) -> None:
+        """map_conservative: atr_pct 0.85 → 25% of FIXED_LOT."""
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                atr_percentile=0.85,
+                bar_key="atr_risk:1",
+            )
+        )
+        self.assertEqual(out["status"], "opened")
+        from production import FIXED_LOT
+
+        self.assertAlmostEqual(state.open_positions[out["trade_id"]].lot, FIXED_LOT * 0.25, places=6)
+        bus.stop()
+
+    def test_take_profit_disabled(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="no_tp:1",
+            )
+        )
+        self.assertEqual(out["status"], "opened")
+        self.assertEqual(state.open_positions[out["trade_id"]].take_profit, 0.0)
+        # move up but stay below trail activation (0.25R = 1.5) so no TRAIL/TP exit
+        closed = pipe.on_bar(
+            high=2001.4, low=2000.1, close=2001.0, timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc)
+        )
+        self.assertEqual(closed, [])
+        self.assertIn(out["trade_id"], state.open_positions)
         bus.stop()
 
 
