@@ -25,6 +25,7 @@ class FillResult:
     retry_count: int
     broker_response: str
     error_message: str | None = None
+    broker_ticket: int | None = None
 
 
 class PaperBroker:

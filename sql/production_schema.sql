@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS trading.trades (
     mfe                 DOUBLE PRECISION,
     exit_reason         TEXT,
     status              TEXT NOT NULL DEFAULT 'open',
+    ticket_id           BIGINT,  -- MT5 position ticket (live); used for restart recovery
     session             TEXT,
     regime              TEXT,
     probability         DOUBLE PRECISION,
@@ -58,8 +59,13 @@ CREATE TABLE IF NOT EXISTS trading.trades (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Idempotent for DBs created before ticket_id existed
+ALTER TABLE trading.trades ADD COLUMN IF NOT EXISTS ticket_id BIGINT;
+
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trading.trades (status);
 CREATE INDEX IF NOT EXISTS idx_trades_entry ON trading.trades (entry_time);
+CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trading.trades (ticket_id) WHERE ticket_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_trades_open_symbol ON trading.trades (symbol) WHERE status = 'open';
 
 CREATE TABLE IF NOT EXISTS trading.skip_logs (
     id                  BIGSERIAL PRIMARY KEY,

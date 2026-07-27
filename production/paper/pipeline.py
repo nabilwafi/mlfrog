@@ -284,6 +284,7 @@ class ProductionPipeline:
             risk_pct=risk_pct,
             atr=atr,
             correlation_id=corr,
+            broker_ticket=int(fill.broker_ticket) if fill.broker_ticket else None,
             extreme_fav=fill.fill_price,
             bars_held=0,
             meta={
@@ -344,6 +345,8 @@ class ProductionPipeline:
                     "trail_atr_mult": TRAIL_ATR_MULT,
                     "trail_activate_r": TRAIL_ACTIVATE_R,
                     "environment": self.environment,
+                    "ticket_id": int(fill.broker_ticket) if fill.broker_ticket else None,
+                    "broker_ticket": int(fill.broker_ticket) if fill.broker_ticket else None,
                 },
                 correlation_id=corr,
             )
@@ -380,9 +383,104 @@ class ProductionPipeline:
                 pos.stop_loss = min(pos.stop_loss, trail_sl)
         return abs(float(pos.stop_loss) - prev) > 1e-9
 
+    def reconcile_broker_positions(self, *, timestamp: datetime) -> list[dict[str, Any]]:
+        """Live: detect broker-side SL/TP closes before candle simulation runs."""
+        reconcile = getattr(self.broker, "reconcile_closed", None)
+        if not callable(reconcile):
+            return []
+        tickets = {
+            tid: int(pos.broker_ticket)
+            for tid, pos in list(self.state.open_positions.items())
+            if pos.broker_ticket
+        }
+        if not tickets:
+            return []
+        try:
+            info_map = reconcile(tickets)
+        except Exception:
+            logger.exception("broker_reconcile_failed")
+            return []
+        closed: list[dict[str, Any]] = []
+        for tid, info in info_map.items():
+            pos = self.state.open_positions.get(tid)
+            if pos is None:
+                continue
+            exit_time = info.get("exit_time") or timestamp
+            if exit_time.tzinfo is None:
+                exit_time = exit_time.replace(tzinfo=timezone.utc)
+            closed.append(
+                self._finalize_close(
+                    tid,
+                    pos,
+                    exit_px=float(info["exit_price"]),
+                    pnl=float(info["pnl"]),
+                    reason=str(info.get("exit_reason") or "BROKER"),
+                    timestamp=exit_time,
+                    broker_response=str(info.get("broker_response") or "BROKER"),
+                )
+            )
+        return closed
+
+    def _finalize_close(
+        self,
+        tid: str,
+        pos: OpenPosition,
+        *,
+        exit_px: float,
+        pnl: float,
+        reason: str,
+        timestamp: datetime,
+        broker_response: str,
+    ) -> dict[str, Any]:
+        ru = max(self.state.r_unit(), 1e-9)
+        pnl_r = pnl / ru
+        self.state.apply_pnl(pnl)
+        if pnl > 0:
+            self.state.wins_today += 1
+        del self.state.open_positions[tid]
+        duration = int((timestamp - pos.entry_time).total_seconds())
+        payload: dict[str, Any] = {
+            "trade_id": tid,
+            "signal_id": pos.signal_id,
+            "symbol": self.symbol,
+            "side": pos.side,
+            "entry_time": pos.entry_time,
+            "exit_time": timestamp,
+            "entry_price": pos.entry_price,
+            "exit_price": exit_px,
+            "stop_loss": pos.stop_loss,
+            "take_profit": pos.take_profit,
+            "lot": pos.lot,
+            "risk_pct": pos.risk_pct,
+            "pnl": pnl,
+            "pnl_r": pnl_r,
+            "duration_seconds": duration,
+            "mae": pos.mae,
+            "mfe": pos.mfe,
+            "exit_reason": reason,
+            "status": "closed",
+            "session": pos.meta.get("session"),
+            "regime": pos.meta.get("regime"),
+            "trend": pos.meta.get("trend"),
+            "volatility": pos.meta.get("volatility"),
+            "momentum": pos.meta.get("momentum"),
+            "structure": pos.meta.get("structure"),
+            "probability": pos.meta.get("probability"),
+            "meta_probability": pos.meta.get("meta_probability"),
+            "confidence": pos.meta.get("confidence"),
+            "trail_atr_mult": pos.meta.get("trail_atr_mult", TRAIL_ATR_MULT),
+            "equity": self.state.equity,
+            "broker_response": broker_response,
+            "environment": self.environment,
+            "ticket_id": int(pos.broker_ticket) if pos.broker_ticket else None,
+            "broker_ticket": int(pos.broker_ticket) if pos.broker_ticket else None,
+        }
+        self.bus.publish(make_event(EventType.TRADE_CLOSED, payload, correlation_id=pos.correlation_id))
+        return payload
+
     def on_bar(self, *, high: float, low: float, close: float, timestamp: datetime) -> list[dict[str, Any]]:
         """Mark open positions; ATR-trail ratchet then SL/TP/TIMEOUT (SL first same-bar)."""
-        closed = []
+        closed = self.reconcile_broker_positions(timestamp=timestamp)
         for tid, pos in list(self.state.open_positions.items()):
             pos.bars_held = int(pos.bars_held) + 1
             mae, mfe = PaperBroker.mark_excursions(pos.side, pos.entry_price, high, low)
@@ -390,6 +488,9 @@ class ProductionPipeline:
             pos.mfe = max(pos.mfe, mfe)
             moved = self._update_trail(pos, high=high, low=low)
             if moved:
+                modify = getattr(self.broker, "modify_stop_loss", None)
+                if callable(modify) and pos.broker_ticket:
+                    modify(tid, float(pos.stop_loss))
                 u_pnl = PaperBroker.pnl(pos.side, pos.entry_price, float(close), pos.lot)
                 self.bus.publish(
                     make_event(
@@ -439,51 +540,46 @@ class ProductionPipeline:
             if reason is None:
                 continue
             fill = self.broker.close_order(tid, exit_px)
+            if not fill.success and fill.broker_response == "NOT_FOUND":
+                # broker already closed — reconcile on next poll will emit TRADE_CLOSED
+                continue
+            exit_px = float(fill.fill_price) if fill.success else float(exit_px)
             pnl = PaperBroker.pnl(pos.side, pos.entry_price, exit_px, pos.lot)
-            ru = max(self.state.r_unit(), 1e-9)
-            pnl_r = pnl / ru
-            self.state.apply_pnl(pnl)
-            if pnl > 0:
-                self.state.wins_today += 1
-            del self.state.open_positions[tid]
-            duration = int((timestamp - pos.entry_time).total_seconds())
-            payload = {
-                "trade_id": tid,
-                "signal_id": pos.signal_id,
-                "symbol": self.symbol,
-                "side": pos.side,
-                "entry_time": pos.entry_time,
-                "exit_time": timestamp,
-                "entry_price": pos.entry_price,
-                "exit_price": exit_px,
-                "stop_loss": pos.stop_loss,
-                "take_profit": pos.take_profit,
-                "lot": pos.lot,
-                "risk_pct": pos.risk_pct,
-                "pnl": pnl,
-                "pnl_r": pnl_r,
-                "duration_seconds": duration,
-                "mae": pos.mae,
-                "mfe": pos.mfe,
-                "exit_reason": reason,
-                "status": "closed",
-                "session": pos.meta.get("session"),
-                "regime": pos.meta.get("regime"),
-                "trend": pos.meta.get("trend"),
-                "volatility": pos.meta.get("volatility"),
-                "momentum": pos.meta.get("momentum"),
-                "structure": pos.meta.get("structure"),
-                "probability": pos.meta.get("probability"),
-                "meta_probability": pos.meta.get("meta_probability"),
-                "confidence": pos.meta.get("confidence"),
-                "trail_atr_mult": pos.meta.get("trail_atr_mult", TRAIL_ATR_MULT),
-                "equity": self.state.equity,
-                "broker_response": fill.broker_response,
-                "environment": self.environment,
-            }
-            self.bus.publish(make_event(EventType.TRADE_CLOSED, payload, correlation_id=pos.correlation_id))
-            closed.append(payload)
+            closed.append(
+                self._finalize_close(
+                    tid,
+                    pos,
+                    exit_px=exit_px,
+                    pnl=pnl,
+                    reason=reason,
+                    timestamp=timestamp,
+                    broker_response=str(fill.broker_response),
+                )
+            )
         return closed
+
+    def recover_from_mt5(
+        self,
+        *,
+        symbol: str | None = None,
+        magic: int = 27001,
+        db: Any | None = None,
+    ) -> int:
+        """Load open broker positions into state; prefer DB trade_id via ticket_id."""
+        from production.live.positions import (
+            enrich_with_db,
+            fetch_broker_open_positions,
+            recover_positions_into_state,
+        )
+
+        sym = str(symbol or self.symbol)
+        try:
+            rows = fetch_broker_open_positions(symbol=sym, magic=magic)
+        except Exception:
+            logger.exception("recover_fetch_failed symbol=%s", sym)
+            return 0
+        rows = enrich_with_db(rows, db, symbol=sym)
+        return recover_positions_into_state(self.state, self.broker, rows, symbol=sym)
 
     def emit_daily_summary(
         self,
@@ -523,6 +619,8 @@ class ProductionPipeline:
             "trades": trades,
             "wins": wins,
             "losses": losses,
+            "running": len(self.state.open_positions),
+            "open_positions": len(self.state.open_positions),
             "winrate": wr,
             "pnl": pnl,
             "pnl_pct": pnl_pct,

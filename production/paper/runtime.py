@@ -59,6 +59,8 @@ class PaperRuntime:
 
                 if hasattr(self.source, "poll"):
                     tick = self.source.poll()
+                    now = datetime.now(timezone.utc)
+                    self.pipeline.reconcile_broker_positions(timestamp=now)
                     if tick.bar is not None:
                         b = tick.bar
                         ts = b.timestamp if b.timestamp.tzinfo else b.timestamp.replace(tzinfo=timezone.utc)
@@ -69,6 +71,7 @@ class PaperRuntime:
                                     "symbol": b.symbol,
                                     "timeframe": b.timeframe,
                                     "timestamp": ts,
+                                    "time_kind": "bar_open_utc",
                                     "open": b.open,
                                     "high": b.high,
                                     "low": b.low,

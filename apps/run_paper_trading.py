@@ -49,6 +49,12 @@ from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.runtime import IdleSignalSource, PaperRuntime, ReplaySignalSource
 from production.paper.state import PortfolioState
 from production.telegram.bot import TelegramNotifier, split_chat_and_thread
+from production.telegram.commands import (
+    TelegramCommandListener,
+    build_candle_check,
+    build_positions_check,
+    build_summary_check,
+)
 from production.workers.handlers import register_workers
 from settings.paths import MT5_CONFIG, MT5_CONFIG_EXAMPLE, PAPER, ROOT
 from settings.strategy import STARTING_EQUITY
@@ -84,6 +90,55 @@ def _build_telegram(tg_cfg: dict[str, Any], *, chat_key: str, thread_key: str) -
         enabled=enabled and bool(chat_id),
         verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
     )
+
+
+def _start_telegram_commands(
+    tg_cfg: dict[str, Any],
+    *,
+    cfg: dict[str, Any],
+    state: PortfolioState,
+    symbol: str,
+    timeframe: str,
+    environment: str,
+    verify_ssl: bool = True,
+) -> TelegramCommandListener | None:
+    if not bool(tg_cfg.get("enabled")) or not tg_cfg.get("bot_token"):
+        return None
+    allowed: set[str] = set()
+    for key in ("chat_id", "health_chat_id", "daily_chat_id", "error_chat_id"):
+        cid, _ = split_chat_and_thread(str(tg_cfg.get(key) or "") or None)
+        if cid:
+            allowed.add(cid)
+    if not allowed:
+        return None
+    primary = next(iter(sorted(allowed)))
+    tg = TelegramNotifier(
+        tg_cfg.get("bot_token"),
+        primary,
+        enabled=True,
+        verify_ssl=verify_ssl,
+    )
+    tf = str(timeframe or "H1").upper()
+
+    def on_candle() -> dict[str, Any]:
+        return build_candle_check(cfg=cfg, symbol=symbol, timeframe=tf)
+
+    def on_summary() -> dict[str, Any]:
+        return build_summary_check(state=state, symbol=symbol, environment=environment)
+
+    def on_positions() -> dict[str, Any]:
+        return build_positions_check(cfg=cfg, state=state, symbol=symbol, timeframe=tf)
+
+    listener = TelegramCommandListener(
+        tg,
+        allowed_chat_ids=allowed,
+        on_check_candle=on_candle,
+        on_check_summary=on_summary,
+        on_check_positions=on_positions,
+    )
+    listener.start()
+    print(f"telegram commands: /candles /summary /positions (chats={len(allowed)})")
+    return listener
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -273,6 +328,12 @@ def main(argv: list[str] | None = None) -> int:
         schema = (ROOT / "sql" / "production_schema.sql").read_text(encoding="utf-8")
         db.apply_schema(schema)
         print("schema applied")
+    elif db.enabled:
+        # ponytail: keep ticket_id available without full re-apply
+        try:
+            db.ensure_ticket_id_column()
+        except Exception:
+            log.exception("ensure_ticket_id_column_failed")
 
     state = PortfolioState(equity=starting, peak_equity=starting)
     # paper = old live (MT5 candles + paper fills); live = broker equity + LiveBroker
@@ -379,6 +440,13 @@ def main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     log.exception("account_sync_failed err=%s — using starting_equity=%.2f", exc, starting)
 
+            if args.mode == "live":
+                n_rec = pipeline.recover_from_mt5(symbol=trade_symbol, db=db)
+                if n_rec:
+                    print(f"recovered {n_rec} open MT5 position(s) — trail/reconcile active")
+                elif do_execute:
+                    log.info("recover_none — no open positions with bot magic on %s", trade_symbol)
+
             runtime = PaperRuntime(
                 pipeline=pipeline,
                 bus=bus,
@@ -395,7 +463,20 @@ def main(argv: list[str] | None = None) -> int:
                     f"PAPER on {trade_symbol} — MT5 candles + frozen stack + paper fills"
                 )
             print(f"monitoring http://{mon_host}:{mon_port}/health")
-            runtime.run_forever()
+            cmd_listener = _start_telegram_commands(
+                tg_cfg,
+                cfg=cfg,
+                state=state,
+                symbol=trade_symbol,
+                timeframe=str(live_cfg.get("timeframe", cfg.get("timeframe", "H1"))),
+                environment=env_name,
+                verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+            )
+            try:
+                runtime.run_forever()
+            finally:
+                if cmd_listener is not None:
+                    cmd_listener.stop()
         else:
             runtime = PaperRuntime(
                 pipeline=pipeline,
@@ -404,7 +485,20 @@ def main(argv: list[str] | None = None) -> int:
                 poll_seconds=poll,
             )
             print(f"paper loop listening; monitoring http://{mon_host}:{mon_port}/health")
-            runtime.run_forever()
+            cmd_listener = _start_telegram_commands(
+                tg_cfg,
+                cfg=cfg,
+                state=state,
+                symbol=trade_symbol,
+                timeframe=str(cfg.get("timeframe", "H1")),
+                environment=env_name,
+                verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+            )
+            try:
+                runtime.run_forever()
+            finally:
+                if cmd_listener is not None:
+                    cmd_listener.stop()
     finally:
         health.stop()
         time.sleep(0.3)

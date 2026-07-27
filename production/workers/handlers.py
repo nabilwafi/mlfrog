@@ -78,6 +78,8 @@ def register_workers(
         p.setdefault("mfe", None)
         p.setdefault("exit_reason", None)
         p["status"] = "open"
+        if p.get("ticket_id") is None and p.get("broker_ticket") is not None:
+            p["ticket_id"] = p.get("broker_ticket")
         db.upsert_trade(p)
         db.insert_execution(
             {
@@ -103,6 +105,8 @@ def register_workers(
         p = dict(ev.payload)
         p["correlation_id"] = ev.correlation_id
         p["status"] = "closed"
+        if p.get("ticket_id") is None and p.get("broker_ticket") is not None:
+            p["ticket_id"] = p.get("broker_ticket")
         db.upsert_trade(p)
         metrics.incr("trades_closed")
         telegram.send(fmt_trade_closed(p))

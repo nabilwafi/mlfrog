@@ -494,6 +494,8 @@ paper_trading:
   health_interval_seconds: 300   # Telegram heartbeat; 0 = start/stop only
   health_probe_throttle_seconds: 60  # min gap when /health also notifies Telegram
   check_mt5: true                # include MT5 terminal/account in HEALTH (+ 503 if down)
+  # MT5 chart clock vs UTC (HF Live often +2 winter / +3 summer). Used by /check_candle.
+  mt5_server_utc_offset_hours: 3
   live:
     timeframe: H1
     history_bars: 400

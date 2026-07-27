@@ -23,6 +23,7 @@ class OpenPosition:
     risk_pct: float
     atr: float
     correlation_id: str
+    broker_ticket: int | None = None  # MT5 position ticket when live
     meta: dict[str, Any] = field(default_factory=dict)
     mae: float = 0.0
     mfe: float = 0.0

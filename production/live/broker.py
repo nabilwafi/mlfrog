@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from production import EXECUTION_ENABLED
@@ -93,6 +94,17 @@ def _trade_preflight(symbol: str) -> str | None:
     return "; ".join(reasons) if reasons else None
 
 
+def _deal_exit_reason(reason: int) -> str:
+    # MT5 ENUM_DEAL_REASON — stable across builds; no import needed for unit tests
+    if reason == 4:
+        return "SL"
+    if reason == 5:
+        return "TP"
+    if reason == 6:
+        return "SL"
+    return "BROKER"
+
+
 def _reject_message(retcode: int, comment: str | None, *, symbol: str) -> str:
     hint = _RETCODE_HINT.get(int(retcode), "")
     pre = _trade_preflight(symbol)
@@ -128,6 +140,10 @@ class LiveBroker:
         self.deviation = int(deviation)
         self._paper = PaperBroker()  # dry-run / fallback simulator
         self._tickets: dict[str, int] = {}  # trade_id → MT5 position ticket
+
+    def register_recovered(self, trade_id: str, ticket: int) -> None:
+        """Re-link trade_id ↔ MT5 ticket after process restart."""
+        self._tickets[str(trade_id)] = int(ticket)
 
     def open_order(
         self,
@@ -191,6 +207,83 @@ class LiveBroker:
                 error_message="no MT5 ticket for trade_id",
             )
         return self._send_close(trade_id=trade_id, ticket=ticket)
+
+    def modify_stop_loss(self, trade_id: str, stop_loss: float) -> bool:
+        """Push trailed SL to the open MT5 position (live execute only)."""
+        if not self.execution_enabled:
+            return False
+        ticket = self._tickets.get(trade_id)
+        if not ticket:
+            return False
+        import MetaTrader5 as mt5
+
+        from production.monitoring import mt5_session
+
+        mt5_session.select_symbol(self.symbol)
+        pos_list = mt5.positions_get(ticket=ticket) or ()
+        if not pos_list:
+            return False
+        pos = pos_list[0]
+        req: dict[str, Any] = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": self.symbol,
+            "position": int(ticket),
+            "sl": float(stop_loss),
+            "tp": float(getattr(pos, "tp", 0) or 0),
+        }
+        result = mt5.order_send(req)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.warning(
+                "modify_sl_failed trade_id=%s ticket=%s sl=%.2f ret=%s",
+                trade_id,
+                ticket,
+                stop_loss,
+                getattr(result, "retcode", mt5.last_error()),
+            )
+            return False
+        logger.info("modify_sl_ok trade_id=%s ticket=%s sl=%.2f", trade_id, ticket, stop_loss)
+        return True
+
+    def reconcile_closed(self, tickets: dict[str, int]) -> dict[str, dict[str, Any]]:
+        """Return close info for trade_ids whose MT5 position is already gone."""
+        if not self.execution_enabled or not tickets:
+            return {}
+        import MetaTrader5 as mt5
+
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(days=7)).replace(tzinfo=None)
+        end = now.replace(tzinfo=None)
+        deals = mt5.history_deals_get(start, end) or ()
+        out: dict[str, dict[str, Any]] = {}
+        for trade_id, ticket in tickets.items():
+            if mt5.positions_get(ticket=ticket):
+                continue
+            pos_deals = [d for d in deals if int(getattr(d, "position_id", 0) or 0) == int(ticket)]
+            close_deals = [d for d in pos_deals if int(getattr(d, "entry", -1)) == mt5.DEAL_ENTRY_OUT]
+            if not close_deals:
+                continue
+            d = close_deals[-1]
+            pnl = float(getattr(d, "profit", 0) or 0)
+            pnl += float(getattr(d, "commission", 0) or 0)
+            pnl += float(getattr(d, "swap", 0) or 0)
+            exit_time = datetime.fromtimestamp(int(getattr(d, "time", 0) or 0), tz=timezone.utc)
+            out[trade_id] = {
+                "exit_price": float(getattr(d, "price", 0) or 0),
+                "pnl": pnl,
+                "exit_reason": _deal_exit_reason(int(getattr(d, "reason", -1))),
+                "exit_time": exit_time,
+                "broker_response": "BROKER",
+            }
+            self._tickets.pop(trade_id, None)
+            logger.info(
+                "broker_position_closed trade_id=%s ticket=%s reason=%s pnl=%.2f exit=%.2f",
+                trade_id,
+                ticket,
+                out[trade_id]["exit_reason"],
+                pnl,
+                out[trade_id]["exit_price"],
+            )
+        return out
 
     def _send_open(
         self,
@@ -274,6 +367,7 @@ class LiveBroker:
             retry_count=0,
             broker_response=str(result.comment or result.retcode),
             error_message=err_msg,
+            broker_ticket=self._tickets.get(trade_id) if ok else None,
         )
 
     def _send_close(self, *, trade_id: str, ticket: int) -> FillResult:

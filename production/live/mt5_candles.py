@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 import pandas as pd
@@ -111,12 +110,13 @@ class MT5CandleFeed:
 
         tf = resolve_timeframe(timeframe)
         for attempt in (1, 2):
-            rates = mt5.copy_rates_from(self._symbol, tf, datetime.now().replace(tzinfo=None), int(count))
+            # ponytail: from_pos avoids datetime.now() local-vs-UTC footgun after weekend gaps
+            rates = mt5.copy_rates_from_pos(self._symbol, tf, 0, int(count))
             if rates is not None:
                 return rates_to_frame(rates)
             err = mt5.last_error()
             code = err[0] if isinstance(err, tuple) and err else None
-            self._log.warning("copy_rates_from_failed tf=%s attempt=%s err=%s", timeframe, attempt, err)
+            self._log.warning("copy_rates_from_pos_failed tf=%s attempt=%s err=%s", timeframe, attempt, err)
             if attempt == 1 and code == _IPC_LOST:
                 mt5_session.ensure_connected(self._cfg)
                 continue
@@ -147,3 +147,22 @@ class MT5CandleFeed:
         if len(frame) < 2:
             return None
         return frame.iloc[[-2]].reset_index(drop=True)
+
+
+def bar_age_seconds(ts: pd.Timestamp, timeframe: str, *, now: pd.Timestamp | None = None) -> float:
+    """Seconds since bar close (open_ts + tf)."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    n = now if now is not None else pd.Timestamp.now(tz="UTC")
+    bar_end = t + pd.Timedelta(seconds=_tf_seconds(timeframe))
+    return float((n - bar_end).total_seconds())
+
+
+def is_stale_closed_bar(ts: pd.Timestamp, timeframe: str, *, now: pd.Timestamp | None = None) -> bool:
+    """True when bar closed long ago → market closed / weekend gap (not a live signal)."""
+    tf = _tf_seconds(timeframe)
+    # > 2 bars old = gap / closed session (H1 → stale after ~2h)
+    return bar_age_seconds(ts, timeframe, now=now) > float(tf * 2)

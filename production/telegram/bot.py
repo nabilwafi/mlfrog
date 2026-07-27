@@ -39,19 +39,38 @@ class TelegramNotifier:
         return ssl._create_unverified_context()
 
     def send(self, text: str, *, parse_mode: str = "HTML") -> bool:
-        if not self._enabled:
+        return self.send_to(
+            text,
+            chat_id=self._chat_id,
+            message_thread_id=self._thread_id,
+            parse_mode=parse_mode,
+        )
+
+    def send_to(
+        self,
+        text: str,
+        *,
+        chat_id: str | int | None = None,
+        message_thread_id: int | None = None,
+        parse_mode: str = "HTML",
+    ) -> bool:
+        if not self._token:
             logger.info("telegram_disabled msg=%s", text[:120])
+            return False
+        cid = str(chat_id or self._chat_id or "").strip()
+        if not cid:
+            logger.info("telegram_no_chat msg=%s", text[:120])
             return False
         url = f"https://api.telegram.org/bot{self._token}/sendMessage"
         payload: dict[str, Any] = {
-            "chat_id": self._chat_id,
+            "chat_id": cid,
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": True,
         }
-        # Forum topics / message threads
-        if self._thread_id is not None:
-            payload["message_thread_id"] = self._thread_id
+        thread = message_thread_id if message_thread_id is not None else self._thread_id
+        if thread is not None:
+            payload["message_thread_id"] = int(thread)
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
@@ -70,6 +89,49 @@ class TelegramNotifier:
         except TimeoutError as exc:
             self._log_fail(exc)
             return False
+
+    def get_updates(self, *, offset: int | None = None, timeout: int = 25) -> list[dict[str, Any]]:
+        """Long-poll Telegram getUpdates (commands)."""
+        if not self._token:
+            return []
+        params: dict[str, Any] = {
+            "timeout": int(timeout),
+            "allowed_updates": ["message"],
+        }
+        if offset is not None:
+            params["offset"] = int(offset)
+        url = f"https://api.telegram.org/bot{self._token}/getUpdates"
+        body = json.dumps(params).encode("utf-8")
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            data = self._post_json(req, verify=self._verify_ssl)
+        except urllib.error.URLError as exc:
+            reason = str(exc.reason) if getattr(exc, "reason", None) else str(exc)
+            if self._verify_ssl and "CERTIFICATE_VERIFY_FAILED" in reason:
+                try:
+                    data = self._post_json(req, verify=False)
+                except Exception as exc2:
+                    self._log_fail(exc2)
+                    return []
+            else:
+                self._log_fail(exc)
+                return []
+        except Exception as exc:
+            self._log_fail(exc)
+            return []
+        if not data or not data.get("ok"):
+            return []
+        result = data.get("result") or []
+        return result if isinstance(result, list) else []
+
+    def _post_json(self, req: urllib.request.Request, *, verify: bool) -> dict[str, Any]:
+        ctx = self._ssl_context(verify=verify)
+        kwargs: dict[str, Any] = {"timeout": 35}
+        if ctx is not None:
+            kwargs["context"] = ctx
+        with urllib.request.urlopen(req, **kwargs) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw else {}
 
     def _post(self, req: urllib.request.Request, *, verify: bool) -> bool:
         ctx = self._ssl_context(verify=verify)
@@ -183,6 +245,7 @@ def _fmt_confidence(v: Any) -> str:
 
 
 def _fmt_utc_time(raw: Any) -> str:
+    """Full timestamp for all notifs: YYYY-MM-DD HH:mm:ss UTC."""
     if raw is None:
         return "n/a"
     try:
@@ -196,9 +259,26 @@ def _fmt_utc_time(raw: Any) -> str:
             ts = ts.replace(tzinfo=timezone.utc)
         else:
             ts = ts.astimezone(timezone.utc)
-        return ts.strftime("%H:%M UTC")
+        return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
     except ValueError:
         return str(raw)
+
+
+def _fmt_now_utc() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _bot_name(p: dict[str, Any] | None = None) -> str:
+    if p and p.get("bot_name"):
+        return str(p["bot_name"])
+    try:
+        from production import PIPELINE_VERSION
+
+        return str(PIPELINE_VERSION)
+    except Exception:
+        return "mlfrog"
 
 
 def _fmt_duration(seconds: Any) -> str:
@@ -406,8 +486,9 @@ def fmt_new_trade(p: dict[str, Any]) -> str:
         f"📊 Primary: {_primary_pct(p)}\n"
         f"🆔 {_fmt_trade_id(p)}\n\n"
         f"{_market_block(p)}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🕒 Time: {_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('entry_time') or p.get('timestamp'))}\n"
+        f"🤖 Bot      : {_bot_name(p)}\n\n"
         "Status: RUNNING"
     )
 
@@ -427,8 +508,9 @@ def fmt_trail_update(p: dict[str, Any]) -> str:
         "🔄 Trailing Stop: ACTIVE\n"
         f"🛡️ New SL: {_fmt_price(p.get('stop_loss'))}\n\n"
         f"{_market_block(p)}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🕒 Time: {_fmt_utc_time(p.get('timestamp'))}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('timestamp'))}\n"
+        f"🤖 Bot      : {_bot_name(p)}\n\n"
         "Status: PROFIT LOCKED"
     )
 
@@ -436,7 +518,15 @@ def fmt_trail_update(p: dict[str, Any]) -> str:
 def fmt_trade_closed(p: dict[str, Any]) -> str:
     reason = str(p.get("exit_reason") or "").upper()
     side = _side_label(p.get("side"))
-    if reason == "TRAIL":
+    try:
+        pnl_f = float(p.get("pnl") or 0)
+    except (TypeError, ValueError):
+        pnl_f = 0.0
+    if reason in {"SL", "BROKER"} or (reason == "TRAIL" and pnl_f < 0):
+        header = "🔴 <b>STOP LOSS</b>"
+        title = f"🔴 {_symbol(p)} | STOP LOSS HIT"
+        status = "CLOSED · SL"
+    elif reason == "TRAIL":
         header = "🟢 <b>TRAIL STOP</b>"
         title = f"🟢 {_symbol(p)} | TRAIL STOP HIT"
         status = "CLOSED · TRAIL"
@@ -449,9 +539,9 @@ def fmt_trade_closed(p: dict[str, Any]) -> str:
         title = f"⚪ {_symbol(p)} | TIME EXIT"
         status = "CLOSED · TIMEOUT"
     else:
-        header = "🔴 <b>STOP LOSS</b>"
-        title = f"🔴 {_symbol(p)} | STOP LOSS HIT"
-        status = "CLOSED · SL"
+        header = "🔴 <b>STOP LOSS</b>" if pnl_f < 0 else "🟢 <b>POSITION CLOSED</b>"
+        title = f"{'🔴' if pnl_f < 0 else '🟢'} {_symbol(p)} | CLOSED"
+        status = "CLOSED · SL" if pnl_f < 0 else "CLOSED"
 
     side_line = f"{'📉' if side == 'BUY' else '📈'} {side} CLOSED"
     pips = _signed_pips(p.get("side"), p.get("entry_price"), p.get("exit_price"))
@@ -466,8 +556,9 @@ def fmt_trade_closed(p: dict[str, Any]) -> str:
         f"⏱ Duration: {_fmt_duration(p.get('duration_seconds'))}\n"
         f"🆔 {_fmt_trade_id(p)}\n\n"
         f"{_market_block(p)}\n\n"
-        "━━━━━━━━━━━━━━\n"
-        f"🕒 Time: {_fmt_utc_time(p.get('exit_time') or p.get('timestamp'))}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('exit_time') or p.get('timestamp'))}\n"
+        f"🤖 Bot      : {_bot_name(p)}\n\n"
         f"Status: {status}"
     )
 
@@ -479,17 +570,21 @@ def fmt_skipped(p: dict[str, Any]) -> str:
         f"Reason   : {_skip_reason_label(p.get('reason'))}\n"
         f"Value    : {_skip_value_label(p)}\n"
         f"Required : {_skip_required_label(p)}\n\n"
-        f"Time     : {_fmt_utc_time(p.get('timestamp') or p.get('entry_time'))}"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('timestamp') or p.get('entry_time'))}\n"
+        f"🤖 Bot      : {_bot_name(p)}"
     )
 
 
 def fmt_error(p: dict[str, Any]) -> str:
     return (
-        "<b>EXECUTION ERROR</b>\n"
+        "🚨 <b>EXECUTION ERROR</b>\n\n"
         f"Trade: <code>{p.get('trade_id')}</code>\n"
         f"Error: {p.get('error_message')}\n"
-        f"Retries: {p.get('retry_count')}\n"
-        f"TS: {p.get('timestamp')}"
+        f"Retries: {p.get('retry_count')}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('timestamp'))}\n"
+        f"🤖 Bot      : {_bot_name(p)}"
     )
 
 
@@ -580,18 +675,142 @@ def fmt_daily(p: dict[str, Any]) -> str:
         return f"${x:.2f}"
 
     symbol = _symbol(p)
+    running = int(p.get("running") or p.get("open_positions") or 0)
+    ts = _fmt_utc_time(p.get("timestamp")) if p.get("timestamp") else _fmt_now_utc()
     return (
         f"🟡 <b>{symbol} DAILY</b>\n\n"
         f"💰 Balance: {_money(balance)}\n"
         f"📈 Equity: {_money(equity)}\n"
         f"💵 PnL: {_money(pnl, signed=True)} ({pnl_pct})\n\n"
         f"📊 Trades: {trades}\n"
-        f"✅ W: {wins} | ❌ L: {int(losses)}\n"
+        f"✅ W: {wins} | ❌ L: {int(losses)} | 🔄 R: {running}\n"
         f"🎯 WR: {wr_pct:.0f}%\n\n"
         f"🔥 Best: {_money(best, signed=True) if best is not None else 'n/a'}\n"
         f"💀 Worst: {_money(worst, signed=True) if worst is not None else 'n/a'}\n\n"
-        f"🤖 Status: {bot_status}"
+        f"🤖 Status: {bot_status}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {ts}\n"
+        f"🤖 Bot      : {_bot_name(p)}"
     )
+
+
+def fmt_check_summary(p: dict[str, Any]) -> str:
+    """On-demand /check_summary — same core stats + W/L/R."""
+    payload = {**p, "status": p.get("status", "ok"), "timestamp": p.get("timestamp") or _fmt_now_utc()}
+    text = fmt_daily(payload).replace("DAILY", "SUMMARY", 1)
+    opens = p.get("open_list") or []
+    if not opens:
+        return text
+    lines = [text, "", "<b>Open positions</b>"]
+    for o in opens[:10]:
+        side = _side_label(o.get("side"))
+        lines.append(
+            f"• {side} {_fmt_price(o.get('entry_price'))} "
+            f"SL {_fmt_price(o.get('stop_loss'))} lot={o.get('lot', 'n/a')}"
+        )
+    return "\n".join(lines)
+
+
+def fmt_check_candle(p: dict[str, Any]) -> str:
+    """On-demand /candles — user template."""
+    symbol = _symbol(p)
+    tf = str(p.get("timeframe") or "H1").upper()
+    closed = p.get("closed") or {}
+    ts = str(p.get("timestamp") or closed.get("time_utc") or _fmt_now_utc())
+    if not ts.endswith("UTC") and "UTC" not in ts:
+        ts = f"{ts} UTC"
+    trend = str(p.get("trend") or closed.get("trend") or "n/a")
+    signal = str(p.get("signal") or "WAIT").upper()
+    status = str(p.get("status") or closed.get("state") or "n/a")
+    closed_line = (
+        f"✅ {tf} candle has closed.\n🔍 Checking strategy..."
+        if closed
+        else f"⏸ No closed {tf} candle yet."
+    )
+    return (
+        f"🔔 <b>CHECK CANDLE {tf}</b>\n\n"
+        f"📌 Symbol    : {symbol}\n"
+        f"🕒 Timeframe : {tf}\n"
+        f"📅 Timestamp : {ts}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"{closed_line}\n\n"
+        f"💰 Open   : {_fmt_price(closed.get('open'))}\n"
+        f"📈 High   : {_fmt_price(closed.get('high'))}\n"
+        f"📉 Low    : {_fmt_price(closed.get('low'))}\n"
+        f"💵 Close  : {_fmt_price(closed.get('close'))}\n\n"
+        f"📊 Trend  : {trend}\n"
+        f"🎯 Signal : {signal}\n"
+        f"📌 Status : {status}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Bot      : {_bot_name(p)}\n"
+        f"🆔 Candle   : {p.get('candle_id') or closed.get('candle_id') or 'n/a'}"
+    )
+
+
+def fmt_check_positions(p: dict[str, Any]) -> str:
+    """On-demand /positions — open MT5/bot positions."""
+    symbol = _symbol(p)
+    tf = str(p.get("timeframe") or "H1").upper()
+    ts = str(p.get("timestamp") or _fmt_now_utc())
+    if "UTC" not in ts:
+        ts = f"{ts} UTC"
+    tag = f"#{symbol}"
+    positions = p.get("positions") or []
+    if not positions:
+        return (
+            "📋 <b>CHECK POSITION</b>\n\n"
+            f"📌 Symbol    : {symbol}\n"
+            f"🕒 Timeframe : {tf}\n"
+            f"📅 Timestamp : {ts}\n\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "ℹ️ No active position found.\n\n"
+            f"📊 Market Status : {p.get('trend') or 'n/a'}\n"
+            "🎯 Next Action   : Waiting for valid setup.\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 Bot : {_bot_name(p)}\n\n"
+            f"{tag} #NoPosition"
+        )
+
+    blocks: list[str] = []
+    for i, pos in enumerate(positions):
+        side = _side_label(pos.get("side"))
+        if side not in {"BUY", "SELL"}:
+            side = "NONE"
+        status = str(pos.get("status") or "OPEN").upper()
+        profit = pos.get("profit")
+        try:
+            pf = float(profit)
+            profit_s = f"+${pf:.2f}" if pf >= 0 else f"-${abs(pf):.2f}"
+        except (TypeError, ValueError):
+            profit_s = "n/a"
+        pips = pos.get("pips")
+        try:
+            pp = float(pips)
+            pips_s = f"+{pp:.0f}" if pp >= 0 else f"{pp:.0f}"
+        except (TypeError, ValueError):
+            pips_s = "n/a"
+        header = "📋 <b>CHECK POSITION</b>" if i == 0 else "📋 <b>CHECK POSITION</b> (cont.)"
+        blocks.append(
+            f"{header}\n\n"
+            f"📌 Symbol    : {symbol}\n"
+            f"🕒 Timeframe : {tf}\n"
+            f"📅 Timestamp : {ts}\n\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            f"📈 Position : {side}\n"
+            f"🎫 Ticket   : {pos.get('ticket') or 'n/a'}\n"
+            f"💵 Lot      : {_lot(pos)}\n"
+            f"💲 Entry    : {_fmt_price(pos.get('entry_price'))}\n"
+            f"📍 Current  : {_fmt_price(pos.get('current_price'))}\n\n"
+            f"💹 Profit   : {profit_s}\n"
+            f"📊 P/L Pips : {pips_s}\n\n"
+            f"🛡️ Stop Loss  : {_fmt_price(pos.get('stop_loss'))}\n"
+            f"🎯 Take Profit : {_fmt_price(pos.get('take_profit'))}\n\n"
+            f"📌 Status : {status}\n\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            f"🤖 Bot : {_bot_name(p)}\n\n"
+            f"{tag} #Position"
+        )
+    return "\n\n".join(blocks)
 
 
 def fmt_health(p: dict[str, Any]) -> str:
@@ -618,7 +837,7 @@ def fmt_health(p: dict[str, Any]) -> str:
 
     env = str(p.get("environment") or p.get("env") or "n/a").upper()
     uptime = p.get("uptime") or p.get("uptime_human") or "n/a"
-    last_check = p.get("last_ping") or p.get("last_check") or "n/a"
+    last_check = p.get("last_ping") or p.get("last_check") or _fmt_now_utc()
     return (
         "❤️ <b>HEALTHCHECK</b>\n\n"
         f"Status: {status_line}\n\n"
@@ -626,5 +845,7 @@ def fmt_health(p: dict[str, Any]) -> str:
         f"🤖 Bot:\n{bot_line}\n\n"
         f"📡 MT5:\n{mt5_line}\n\n"
         f"⏱ Uptime:\n{uptime}\n\n"
-        f"Last Check:\n{last_check}"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"📅 Timestamp : {_fmt_utc_time(p.get('timestamp')) if p.get('timestamp') else last_check}\n"
+        f"🤖 Bot      : {_bot_name(p)}"
     )

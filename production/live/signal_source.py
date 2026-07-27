@@ -12,7 +12,7 @@ import pandas as pd
 
 from production.live.features import LiveFeatureBuilder
 from production.live.inference import FrozenStackInference, ScoredSignal
-from production.live.mt5_candles import MT5CandleFeed
+from production.live.mt5_candles import MT5CandleFeed, is_stale_closed_bar
 from production.paper.pipeline import IncomingSignal
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ class LiveMT5SignalSource:
         self._features = LiveFeatureBuilder(cfg, symbol=self._symbol, timezone=str(cfg.get("timezone", "UTC")))
         self._inference = FrozenStackInference(cfg, symbol=ms, timeframe=timeframe)
         self._last_bar_ts: pd.Timestamp | None = None
+        self._market_was_closed: bool = False
 
     def connect(self) -> None:
         self._feed.connect()
@@ -89,6 +90,22 @@ class LiveMT5SignalSource:
             ts = ts.tz_convert("UTC")
         if self._last_bar_ts is not None and ts <= self._last_bar_ts:
             return LiveTick(bar=None, signals=[])
+
+        # Weekend / holiday: last MT5 bar is fully closed but stale — seed cursor only.
+        # Without this, bot "eats" Friday as a live bar then looks stuck until next close.
+        if is_stale_closed_bar(ts, self._timeframe):
+            if self._last_bar_ts is None or ts > self._last_bar_ts:
+                self._last_bar_ts = ts
+                self._market_was_closed = True
+                logger.info(
+                    "live_market_closed_seed_cursor ts=%s — waiting for first bar after reopen",
+                    ts.isoformat(),
+                )
+            return LiveTick(bar=None, signals=[])
+
+        if self._market_was_closed:
+            logger.info("live_market_reopened first_bar_ts=%s", ts.isoformat())
+            self._market_was_closed = False
 
         try:
             h1 = self._feed.fetch(self._timeframe, count=self._history)

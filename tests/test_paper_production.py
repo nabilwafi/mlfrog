@@ -464,7 +464,7 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("Reason   : Confidence", text)
         self.assertIn("Value    : 68%", text)
         self.assertIn("Required : ≥70%", text)
-        self.assertIn("Time     : 15:20 UTC", text)
+        self.assertIn("Timestamp : 2026-07-19 15:20:00 UTC", text)
 
     def test_fmt_health(self) -> None:
         text = fmt_health(
@@ -473,7 +473,7 @@ class TelegramFmtTests(unittest.TestCase):
                 "environment": "paper",
                 "mt5": "connected",
                 "uptime": "5h 32m",
-                "last_ping": "2026-07-19 15:45 UTC",
+                "last_ping": "2026-07-19 15:45:00 UTC",
             }
         )
         self.assertIn("HEALTHCHECK", text)
@@ -482,7 +482,7 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("✅ Running", text)
         self.assertIn("✅ Connected", text)
         self.assertIn("5h 32m", text)
-        self.assertIn("2026-07-19 15:45 UTC", text)
+        self.assertIn("2026-07-19 15:45:00 UTC", text)
 
     def test_fmt_health_mt5_down(self) -> None:
         text = fmt_health({"status": "degraded", "mt5": "down", "uptime": "1h 0m", "last_ping": "n/a"})
@@ -514,10 +514,113 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("Trades: 5", text)
         self.assertIn("W: 3", text)
         self.assertIn("L: 2", text)
+        self.assertIn("R: 0", text)
         self.assertIn("WR: 60%", text)
         self.assertIn("Best: +$1.50", text)
         self.assertIn("Worst: -$0.80", text)
         self.assertIn("Online", text)
+
+    def test_fmt_check_summary_running(self) -> None:
+        from production.telegram.bot import fmt_check_summary
+
+        text = fmt_check_summary(
+            {
+                "symbol": "XAUUSDc",
+                "balance": 100.0,
+                "equity": 100.0,
+                "pnl": 0.0,
+                "pnl_pct": 0.0,
+                "trades": 3,
+                "wins": 1,
+                "losses": 1,
+                "running": 1,
+                "open_list": [{"side": "long", "entry_price": 2650.0, "stop_loss": 2640.0, "lot": 0.01}],
+            }
+        )
+        self.assertIn("SUMMARY", text)
+        self.assertIn("W: 1", text)
+        self.assertIn("L: 1", text)
+        self.assertIn("R: 1", text)
+        self.assertIn("Open positions", text)
+
+    def test_fmt_check_candle_mt5_time(self) -> None:
+        from production.telegram.bot import fmt_check_candle
+        from production.telegram.commands import fmt_mt5_time
+
+        self.assertEqual(fmt_mt5_time(1720000000, offset_hours=3), "2024-07-03 12:46:40")
+        text = fmt_check_candle(
+            {
+                "symbol": "XAUUSDc",
+                "timeframe": "H1",
+                "timestamp": "2026-07-27 13:00:00 UTC",
+                "trend": "BULLISH",
+                "signal": "WAIT",
+                "status": "READY",
+                "bot_name": "mlfrog-test",
+                "candle_id": "#H1-20260727-1300",
+                "closed": {
+                    "time_utc": "2026-07-27 13:00:00 UTC",
+                    "open": 2650.0,
+                    "high": 2655.0,
+                    "low": 2648.0,
+                    "close": 2652.0,
+                    "state": "READY",
+                    "candle_id": "#H1-20260727-1300",
+                },
+            }
+        )
+        self.assertIn("CHECK CANDLE H1", text)
+        self.assertIn("Symbol    : XAUUSDC", text)
+        self.assertIn("2026-07-27 13:00:00 UTC", text)
+        self.assertIn("Open   : 2650.00", text)
+        self.assertIn("Signal : WAIT", text)
+        self.assertIn("Bot      : mlfrog-test", text)
+        self.assertIn("#H1-20260727-1300", text)
+
+    def test_fmt_check_positions_empty_and_open(self) -> None:
+        from production.telegram.bot import fmt_check_positions
+
+        empty = fmt_check_positions(
+            {
+                "symbol": "XAUUSDc",
+                "timeframe": "H1",
+                "timestamp": "2026-07-27 13:00:00 UTC",
+                "trend": "SIDEWAYS",
+                "bot_name": "mlfrog-test",
+                "positions": [],
+            }
+        )
+        self.assertIn("CHECK POSITION", empty)
+        self.assertIn("No active position found", empty)
+        self.assertIn("#NoPosition", empty)
+        self.assertIn("Waiting for valid setup", empty)
+
+        open_txt = fmt_check_positions(
+            {
+                "symbol": "XAUUSDc",
+                "timeframe": "H1",
+                "timestamp": "2026-07-27 13:00:00 UTC",
+                "bot_name": "mlfrog-test",
+                "positions": [
+                    {
+                        "side": "long",
+                        "ticket": 123,
+                        "lot": 0.01,
+                        "entry_price": 2650.0,
+                        "current_price": 2652.0,
+                        "profit": 2.0,
+                        "pips": 20,
+                        "stop_loss": 2640.0,
+                        "take_profit": 0.0,
+                        "status": "OPEN",
+                    }
+                ],
+            }
+        )
+        self.assertIn("Position : BUY", open_txt)
+        self.assertIn("Ticket   : 123", open_txt)
+        self.assertIn("Profit   : +$2.00", open_txt)
+        self.assertIn("#Position", open_txt)
 
 
 class HealthReporterTests(unittest.TestCase):
@@ -635,14 +738,190 @@ class LiveSourceTests(unittest.TestCase):
             [{"timestamp": ts, "atr_percent": 0.2, "session_london": 1.0, "d1_regime": "Sideways"}]
         )
         src._inference = FakeInference()  # type: ignore[assignment]
+        # bar ts is historical — force fresh so stale-gate does not seed-skip
+        import production.live.signal_source as ss
 
-        t1 = src.poll()
-        t2 = src.poll()
+        _real_stale = ss.is_stale_closed_bar
+        ss.is_stale_closed_bar = lambda *a, **k: False  # type: ignore[assignment]
+        try:
+            t1 = src.poll()
+            t2 = src.poll()
+        finally:
+            ss.is_stale_closed_bar = _real_stale  # type: ignore[assignment]
         self.assertIsNotNone(t1.bar)
         self.assertEqual(t1.bar.symbol, "XAUUSD")
         self.assertEqual(len(t1.signals), 1)  # one side per bar (best meta)
         self.assertAlmostEqual(t1.signals[0].atr, 2302.0 * 0.2 / 100.0, places=6)
         self.assertEqual(len(t2.signals), 0)
+
+    def test_stale_bar_seeds_cursor_waits_for_reopen(self) -> None:
+        from production.live.mt5_candles import is_stale_closed_bar
+        from production.live.signal_source import LiveMT5SignalSource
+
+        fri = pd.Timestamp("2024-06-07 20:00:00", tz="UTC")  # Friday H1
+        sun = pd.Timestamp("2024-06-09 22:00:00", tz="UTC")  # first bar after open
+        now_weekend = pd.Timestamp("2024-06-09 12:00:00", tz="UTC")
+        now_after = pd.Timestamp("2024-06-09 23:05:00", tz="UTC")
+        self.assertTrue(is_stale_closed_bar(fri, "H1", now=now_weekend))
+        self.assertFalse(is_stale_closed_bar(sun, "H1", now=now_after))
+
+        closed_fri = pd.DataFrame(
+            [
+                {
+                    "timestamp": fri,
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "tick_volume": 1,
+                    "spread": 0,
+                    "real_volume": 0,
+                }
+            ]
+        )
+        closed_sun = closed_fri.copy()
+        closed_sun.loc[0, "timestamp"] = sun
+
+        class Feed:
+            def __init__(self) -> None:
+                self.bar = closed_fri
+
+            def latest_closed_bar(self, timeframe: str):
+                return self.bar
+
+            def fetch(self, timeframe: str, *, count: int):
+                return self.bar
+
+        class Inf:
+            def score_row(self, row, *, side: str, entry_price: float, atr: float):
+                from production.live.inference import ScoredSignal
+
+                return ScoredSignal(
+                    side=side,
+                    timestamp=sun,
+                    entry_price=entry_price,
+                    atr=atr,
+                    probability=0.6,
+                    meta_probability=0.6,
+                    confidence=60.0,
+                    session="asia",
+                    regime="Sideways",
+                    bar_key=str(sun) + ":" + side,
+                )
+
+        src = LiveMT5SignalSource({"timezone": "UTC"}, symbol="XAUUSD")
+        feed = Feed()
+        src._feed = feed  # type: ignore[assignment]
+        src._inference = Inf()  # type: ignore[assignment]
+        src._features.build_panel = lambda **_: pd.DataFrame(  # type: ignore[method-assign]
+            [{"timestamp": sun, "atr_percent": 0.2, "session_asia": 1.0, "d1_regime": "Sideways"}]
+        )
+
+        # Patch stale check via real timestamps: fri is stale vs "now" inside is_stale —
+        # use monkeypatch by temporarily wrapping is_stale in module
+        import production.live.signal_source as ss
+
+        real = ss.is_stale_closed_bar
+
+        def stale_vs_clock(ts, timeframe, *, now=None):
+            clock = now_weekend if pd.Timestamp(ts) == fri else now_after
+            return real(ts, timeframe, now=clock)
+
+        ss.is_stale_closed_bar = stale_vs_clock  # type: ignore[assignment]
+        try:
+            t0 = src.poll()  # Friday while closed → seed only
+            self.assertIsNone(t0.bar)
+            self.assertEqual(src._last_bar_ts, fri)
+            self.assertTrue(src._market_was_closed)
+
+            feed.bar = closed_sun
+            t1 = src.poll()  # first bar after reopen → emit
+            self.assertIsNotNone(t1.bar)
+            self.assertEqual(pd.Timestamp(t1.bar.timestamp), sun)
+            self.assertFalse(src._market_was_closed)
+        finally:
+            ss.is_stale_closed_bar = real  # type: ignore[assignment]
+
+    def test_recover_positions_into_state(self) -> None:
+        from datetime import datetime, timezone
+
+        from production.live.positions import BrokerOpenPosition, recover_positions_into_state
+        from production.paper.state import PortfolioState
+
+        state = PortfolioState(equity=500.0, peak_equity=500.0)
+
+        class FakeBroker:
+            def __init__(self) -> None:
+                self.tickets: dict[str, int] = {}
+
+            def register_recovered(self, trade_id: str, ticket: int) -> None:
+                self.tickets[trade_id] = ticket
+
+        broker = FakeBroker()
+        row = BrokerOpenPosition(
+            trade_id="recovered-abc-77",
+            broker_ticket=77,
+            side="long",
+            entry_time=datetime(2026, 7, 27, 13, 0, tzinfo=timezone.utc),
+            entry_price=2650.0,
+            stop_loss=2640.0,
+            take_profit=0.0,
+            lot=0.01,
+            comment="xauusd:abc",
+        )
+        n = recover_positions_into_state(state, broker, [row], symbol="XAUUSDc")
+        self.assertEqual(n, 1)
+        self.assertIn("recovered-abc-77", state.open_positions)
+        self.assertEqual(state.open_positions["recovered-abc-77"].broker_ticket, 77)
+        self.assertEqual(broker.tickets["recovered-abc-77"], 77)
+        self.assertTrue(state.open_positions["recovered-abc-77"].meta.get("recovered"))
+        # idempotent
+        self.assertEqual(recover_positions_into_state(state, broker, [row], symbol="XAUUSDc"), 0)
+
+    def test_enrich_with_db_prefers_trade_id(self) -> None:
+        from datetime import datetime, timezone
+
+        from production.live.positions import BrokerOpenPosition, enrich_with_db
+
+        row = BrokerOpenPosition(
+            trade_id="recovered-abc-77",
+            broker_ticket=77,
+            side="long",
+            entry_time=datetime(2026, 7, 27, 13, 0, tzinfo=timezone.utc),
+            entry_price=2650.0,
+            stop_loss=2640.0,
+            take_profit=0.0,
+            lot=0.01,
+            comment="xauusd:abc",
+        )
+
+        class FakeDb:
+            enabled = True
+
+            def fetch_open_trades_by_ticket(self, *, symbol=None, tickets=None):
+                return {
+                    77: {
+                        "trade_id": "original-signal-id",
+                        "signal_id": "original-signal-id",
+                        "correlation_id": "corr1",
+                        "entry_price": 2650.5,
+                        "lot": 0.01,
+                        "risk_pct": 0.01,
+                        "entry_time": datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc),
+                        "session": "london",
+                        "regime": "Trend",
+                        "probability": 0.7,
+                        "meta_probability": 0.6,
+                        "confidence": 55.0,
+                    }
+                }
+
+        enriched = enrich_with_db([row], FakeDb(), symbol="XAUUSDc")
+        self.assertEqual(len(enriched), 1)
+        self.assertEqual(enriched[0].trade_id, "original-signal-id")
+        self.assertTrue(enriched[0].from_db)
+        self.assertEqual(enriched[0].session, "london")
+        self.assertEqual(enriched[0].broker_ticket, 77)
 
 
 class CandleEventTests(unittest.TestCase):

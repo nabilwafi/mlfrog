@@ -80,23 +80,46 @@ class PostgresWriter:
         """
         self._execute(sql, row)
 
+    def ensure_ticket_id_column(self) -> None:
+        """Add ticket_id if missing (DBs created before the column)."""
+        self._execute(
+            "ALTER TABLE trading.trades ADD COLUMN IF NOT EXISTS ticket_id BIGINT",
+            {},
+        )
+        self._execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_ticket ON trading.trades (ticket_id) WHERE ticket_id IS NOT NULL",
+            {},
+        )
+
     def upsert_trade(self, row: dict[str, Any]) -> None:
+        payload = dict(row)
+        # accept broker_ticket alias from live fill
+        if payload.get("ticket_id") is None and payload.get("broker_ticket") is not None:
+            payload["ticket_id"] = payload.get("broker_ticket")
+        payload.setdefault("ticket_id", None)
+        payload.setdefault("probability", None)
+        payload.setdefault("meta_probability", None)
+        payload.setdefault("confidence", None)
+        payload.setdefault("session", None)
+        payload.setdefault("regime", None)
         sql = """
         INSERT INTO trading.trades (
             trade_id, signal_id, correlation_id, symbol, side,
             entry_time, exit_time, entry_price, exit_price, stop_loss, take_profit,
             lot, risk_pct, pnl, pnl_r, duration_seconds, mae, mfe, exit_reason, status,
-            session, regime, probability, meta_probability, confidence, updated_at
+            ticket_id, session, regime, probability, meta_probability, confidence, updated_at
         ) VALUES (
             %(trade_id)s, %(signal_id)s, %(correlation_id)s, %(symbol)s, %(side)s,
             %(entry_time)s, %(exit_time)s, %(entry_price)s, %(exit_price)s, %(stop_loss)s, %(take_profit)s,
             %(lot)s, %(risk_pct)s, %(pnl)s, %(pnl_r)s, %(duration_seconds)s, %(mae)s, %(mfe)s,
-            %(exit_reason)s, %(status)s, %(session)s, %(regime)s,
+            %(exit_reason)s, %(status)s, %(ticket_id)s, %(session)s, %(regime)s,
             %(probability)s, %(meta_probability)s, %(confidence)s, NOW()
         )
         ON CONFLICT (trade_id) DO UPDATE SET
             exit_time = EXCLUDED.exit_time,
             exit_price = EXCLUDED.exit_price,
+            stop_loss = COALESCE(EXCLUDED.stop_loss, trading.trades.stop_loss),
+            take_profit = COALESCE(EXCLUDED.take_profit, trading.trades.take_profit),
             pnl = EXCLUDED.pnl,
             pnl_r = EXCLUDED.pnl_r,
             duration_seconds = EXCLUDED.duration_seconds,
@@ -104,9 +127,50 @@ class PostgresWriter:
             mfe = EXCLUDED.mfe,
             exit_reason = EXCLUDED.exit_reason,
             status = EXCLUDED.status,
+            ticket_id = COALESCE(EXCLUDED.ticket_id, trading.trades.ticket_id),
             updated_at = NOW()
         """
-        self._execute(sql, row)
+        self._execute(sql, payload)
+
+    def fetch_open_trades_by_ticket(
+        self,
+        *,
+        symbol: str | None = None,
+        tickets: list[int] | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Map MT5 ticket_id → open trade row (for restart recovery)."""
+        if not self._enabled or self._psycopg2 is None:
+            return {}
+        clauses = ["status = 'open'", "ticket_id IS NOT NULL"]
+        params: dict[str, Any] = {}
+        if symbol:
+            clauses.append("symbol = %(symbol)s")
+            params["symbol"] = symbol
+        if tickets:
+            clauses.append("ticket_id = ANY(%(tickets)s)")
+            params["tickets"] = [int(t) for t in tickets]
+        sql = f"""
+        SELECT trade_id, signal_id, correlation_id, symbol, side,
+               entry_time, entry_price, stop_loss, take_profit, lot, risk_pct,
+               ticket_id, session, regime, probability, meta_probability, confidence
+        FROM trading.trades
+        WHERE {' AND '.join(clauses)}
+        """
+        out: dict[int, dict[str, Any]] = {}
+        try:
+            with self.connection() as conn:
+                if conn is None:
+                    return {}
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    cols = [d[0] for d in cur.description]
+                    for row in cur.fetchall():
+                        d = dict(zip(cols, row))
+                        tid = int(d["ticket_id"])
+                        out[tid] = d
+        except Exception:
+            logger.exception("fetch_open_trades_by_ticket_failed")
+        return out
 
     def insert_skip(self, row: dict[str, Any]) -> None:
         sql = """
