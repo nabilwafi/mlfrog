@@ -60,14 +60,14 @@ Sim helpers (trail / ruin-stop portfolio): `simulation/wf/sim.py`
 python apps/run_paper_trading.py --mode replay --max-signals 50
 python apps/run_paper_trading.py --mode paper --apply-schema
 
-# Live — production schema; add --execute only when ready for real orders
+# Live — production schema; always real MT5 order_send
 python apps/run_live_trading.py
-python apps/run_live_trading.py --execute --apply-schema
+python apps/run_live_trading.py --apply-schema
 ```
 
 Schemas:
-- `sql/testing_schema.sql` → `testing.trades` / `history_trades` / `candles` (PK `ticket_id`)
-- `sql/production_schema.sql` → `production.*` (same lean shape)
+- `sql/testing_schema.sql` → rich (`signals`, `skip_logs`, `execution_logs`, `audit_logs`, …) + `trades`/`history_trades`/`candles` (PK `ticket_id`)
+- `sql/production_schema.sql` → lean `production.trades` / `history_trades` / `candles` (no `signal_id`/`correlation_id`)
 
 Monitoring: `http://<LAN-IP>:8787/health` · `/metrics` · `/portfolio`
 

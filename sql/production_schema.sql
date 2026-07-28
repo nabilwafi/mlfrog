@@ -1,12 +1,11 @@
--- Live trading schema (real MT5 order_send). Lean: candles + open trades + history.
--- PK for trades/history = ticket_id (MT5 position ticket).
+-- Live trading schema. Always real MT5 order_send.
+-- Lean: candles + open trades + history. PK = ticket_id.
+-- No signal_id / correlation_id.
 
 CREATE SCHEMA IF NOT EXISTS production;
 
 CREATE TABLE IF NOT EXISTS production.trades (
     ticket_id           BIGINT PRIMARY KEY,
-    signal_id           TEXT,
-    correlation_id      TEXT,
     symbol              TEXT NOT NULL,
     side                TEXT NOT NULL,
     entry_time          TIMESTAMPTZ NOT NULL,
@@ -29,8 +28,6 @@ CREATE INDEX IF NOT EXISTS idx_production_trades_symbol ON production.trades (sy
 
 CREATE TABLE IF NOT EXISTS production.history_trades (
     ticket_id           BIGINT PRIMARY KEY,
-    signal_id           TEXT,
-    correlation_id      TEXT,
     symbol              TEXT NOT NULL,
     side                TEXT NOT NULL,
     entry_time          TIMESTAMPTZ NOT NULL,

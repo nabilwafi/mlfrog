@@ -1,7 +1,32 @@
--- Paper trading schema (MT5 candles OK; fills simulated — never real order_send).
--- Same lean shape as production; PK = ticket_id (synthetic paper ticket).
+-- Paper trading schema (simulated fills). Rich observability tables.
+-- PK for trades/history = ticket_id (synthetic paper ticket).
 
 CREATE SCHEMA IF NOT EXISTS testing;
+
+CREATE TABLE IF NOT EXISTS testing.signals (
+    signal_id           TEXT PRIMARY KEY,
+    correlation_id      TEXT NOT NULL,
+    timestamp           TIMESTAMPTZ NOT NULL,
+    symbol              TEXT NOT NULL,
+    side                TEXT NOT NULL,
+    probability         DOUBLE PRECISION,
+    meta_probability    DOUBLE PRECISION,
+    confidence          DOUBLE PRECISION,
+    threshold_meta      DOUBLE PRECISION,
+    threshold_confidence DOUBLE PRECISION,
+    model_version       TEXT,
+    meta_version        TEXT,
+    feature_version     TEXT,
+    label_version       TEXT,
+    pipeline_version    TEXT,
+    accepted            BOOLEAN NOT NULL DEFAULT FALSE,
+    session             TEXT,
+    regime              TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_testing_signals_ts ON testing.signals (timestamp);
+CREATE INDEX IF NOT EXISTS idx_testing_signals_accepted ON testing.signals (accepted);
 
 CREATE TABLE IF NOT EXISTS testing.trades (
     ticket_id           BIGINT PRIMARY KEY,
@@ -59,6 +84,77 @@ CREATE TABLE IF NOT EXISTS testing.history_trades (
 CREATE INDEX IF NOT EXISTS idx_testing_history_exit ON testing.history_trades (exit_time);
 CREATE INDEX IF NOT EXISTS idx_testing_history_entry ON testing.history_trades (entry_time);
 CREATE INDEX IF NOT EXISTS idx_testing_history_symbol ON testing.history_trades (symbol);
+
+CREATE TABLE IF NOT EXISTS testing.skip_logs (
+    id                  BIGSERIAL PRIMARY KEY,
+    correlation_id      TEXT NOT NULL,
+    signal_id           TEXT,
+    timestamp           TIMESTAMPTZ NOT NULL,
+    symbol              TEXT NOT NULL,
+    reason              TEXT NOT NULL,
+    threshold           DOUBLE PRECISION,
+    current_value       DOUBLE PRECISION,
+    detail              JSONB,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_testing_skip_ts ON testing.skip_logs (timestamp);
+CREATE INDEX IF NOT EXISTS idx_testing_skip_reason ON testing.skip_logs (reason);
+
+CREATE TABLE IF NOT EXISTS testing.execution_logs (
+    id                  BIGSERIAL PRIMARY KEY,
+    correlation_id      TEXT NOT NULL,
+    ticket_id           BIGINT,
+    timestamp           TIMESTAMPTZ NOT NULL,
+    latency_ms          DOUBLE PRECISION,
+    broker_response     TEXT,
+    spread              DOUBLE PRECISION,
+    slippage            DOUBLE PRECISION,
+    retry_count         INTEGER DEFAULT 0,
+    success             BOOLEAN NOT NULL DEFAULT TRUE,
+    error_message       TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_testing_exec_ts ON testing.execution_logs (timestamp);
+
+CREATE TABLE IF NOT EXISTS testing.daily_statistics (
+    date                DATE PRIMARY KEY,
+    equity              DOUBLE PRECISION NOT NULL,
+    daily_r             DOUBLE PRECISION,
+    drawdown            DOUBLE PRECISION,
+    heat_triggered      INTEGER DEFAULT 0,
+    trades              INTEGER DEFAULT 0,
+    wins                INTEGER DEFAULT 0,
+    winrate             DOUBLE PRECISION,
+    pnl                 DOUBLE PRECISION,
+    skipped             INTEGER DEFAULT 0,
+    meta_rejects        INTEGER DEFAULT 0,
+    confidence_rejects  INTEGER DEFAULT 0,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS testing.metrics (
+    id                  BIGSERIAL PRIMARY KEY,
+    timestamp           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    name                TEXT NOT NULL,
+    value               DOUBLE PRECISION NOT NULL,
+    labels              JSONB,
+    correlation_id      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_testing_metrics_name_ts ON testing.metrics (name, timestamp);
+
+CREATE TABLE IF NOT EXISTS testing.audit_logs (
+    id                  BIGSERIAL PRIMARY KEY,
+    timestamp           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    correlation_id      TEXT,
+    component           TEXT NOT NULL,
+    action              TEXT NOT NULL,
+    detail              JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_testing_audit_ts ON testing.audit_logs (timestamp);
 
 CREATE TABLE IF NOT EXISTS testing.candles (
     symbol              TEXT NOT NULL,

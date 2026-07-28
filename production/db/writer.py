@@ -1,4 +1,4 @@
-"""Postgres writer — lean runtime schemas (testing | production). Worker-side only."""
+"""Postgres writer — testing (rich) | production (lean). Worker-side only."""
 
 from __future__ import annotations
 
@@ -15,9 +15,9 @@ _SCHEMA_OK = re.compile(r"^[a-z_][a-z0-9_]*$", re.I)
 
 class PostgresWriter:
     """
-    Thin SQL writer for lean trading schemas.
-    Tables: {schema}.trades (open), {schema}.history_trades, {schema}.candles.
-    PK = ticket_id.
+    testing  → rich tables (signals, skip, execution, audit, daily, metrics + trades/history/candles)
+    production → lean (trades/history/candles only; no signal_id/correlation_id)
+    PK for trades/history = ticket_id.
     """
 
     _EXIT_FIELDS = (
@@ -58,6 +58,11 @@ class PostgresWriter:
     def schema(self) -> str:
         return self._schema
 
+    @property
+    def is_rich(self) -> bool:
+        """testing schema keeps observability tables."""
+        return self._schema == "testing"
+
     def _t(self, table: str) -> str:
         return f"{self._schema}.{table}"
 
@@ -84,88 +89,18 @@ class PostgresWriter:
                 cur.execute(schema_sql)
 
     def ensure_schema(self) -> None:
-        """Idempotent CREATE for lean tables (same DDL as sql/*_schema.sql)."""
-        s = self._schema
-        self._execute(f"CREATE SCHEMA IF NOT EXISTS {s}", {})
-        self._execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {s}.trades (
-                ticket_id           BIGINT PRIMARY KEY,
-                signal_id           TEXT,
-                correlation_id      TEXT,
-                symbol              TEXT NOT NULL,
-                side                TEXT NOT NULL,
-                entry_time          TIMESTAMPTZ NOT NULL,
-                entry_price         DOUBLE PRECISION NOT NULL,
-                stop_loss           DOUBLE PRECISION NOT NULL,
-                take_profit         DOUBLE PRECISION NOT NULL DEFAULT 0,
-                lot                 DOUBLE PRECISION NOT NULL,
-                risk_pct            DOUBLE PRECISION NOT NULL DEFAULT 0,
-                session             TEXT,
-                regime              TEXT,
-                probability         DOUBLE PRECISION,
-                meta_probability    DOUBLE PRECISION,
-                confidence          DOUBLE PRECISION,
-                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """,
-            {},
-        )
-        self._execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {s}.history_trades (
-                ticket_id           BIGINT PRIMARY KEY,
-                signal_id           TEXT,
-                correlation_id      TEXT,
-                symbol              TEXT NOT NULL,
-                side                TEXT NOT NULL,
-                entry_time          TIMESTAMPTZ NOT NULL,
-                exit_time           TIMESTAMPTZ,
-                entry_price         DOUBLE PRECISION NOT NULL,
-                exit_price          DOUBLE PRECISION,
-                stop_loss           DOUBLE PRECISION NOT NULL,
-                take_profit         DOUBLE PRECISION NOT NULL DEFAULT 0,
-                lot                 DOUBLE PRECISION NOT NULL,
-                risk_pct            DOUBLE PRECISION NOT NULL DEFAULT 0,
-                pnl                 DOUBLE PRECISION,
-                pnl_r               DOUBLE PRECISION,
-                duration_seconds    INTEGER,
-                mae                 DOUBLE PRECISION,
-                mfe                 DOUBLE PRECISION,
-                exit_reason         TEXT,
-                session             TEXT,
-                regime              TEXT,
-                probability         DOUBLE PRECISION,
-                meta_probability    DOUBLE PRECISION,
-                confidence          DOUBLE PRECISION,
-                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
-            """,
-            {},
-        )
-        self._execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {s}.candles (
-                symbol              TEXT NOT NULL,
-                timeframe           TEXT NOT NULL,
-                timestamp           TIMESTAMPTZ NOT NULL,
-                open                DOUBLE PRECISION NOT NULL,
-                high                DOUBLE PRECISION NOT NULL,
-                low                 DOUBLE PRECISION NOT NULL,
-                close               DOUBLE PRECISION NOT NULL,
-                tick_volume         DOUBLE PRECISION,
-                spread              DOUBLE PRECISION,
-                real_volume         DOUBLE PRECISION,
-                source              TEXT NOT NULL DEFAULT 'mt5_live',
-                features            JSONB,
-                created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (symbol, timeframe, timestamp)
-            )
-            """,
-            {},
-        )
+        """Apply matching SQL file content via CREATE IF NOT EXISTS helpers."""
+        from settings.paths import ROOT
+
+        name = "testing_schema.sql" if self.is_rich else "production_schema.sql"
+        path = ROOT / "sql" / name
+        if path.is_file():
+            self.apply_schema(path.read_text(encoding="utf-8"))
+        else:
+            logger.warning("schema_sql_missing path=%s", path)
+
+    def ensure_ticket_id_column(self) -> None:
+        self.ensure_schema()
 
     @staticmethod
     def _normalize(row: dict[str, Any]) -> dict[str, Any]:
@@ -192,19 +127,34 @@ class PostgresWriter:
             logger.warning("insert_open_trade skipped — missing ticket_id")
             return
         payload["ticket_id"] = int(payload["ticket_id"])
+        if self.is_rich:
+            cols = (
+                "ticket_id, signal_id, correlation_id, symbol, side, "
+                "entry_time, entry_price, stop_loss, take_profit, lot, risk_pct, "
+                "session, regime, probability, meta_probability, confidence, updated_at"
+            )
+            vals = (
+                "%(ticket_id)s, %(signal_id)s, %(correlation_id)s, %(symbol)s, %(side)s, "
+                "%(entry_time)s, %(entry_price)s, %(stop_loss)s, %(take_profit)s, %(lot)s, %(risk_pct)s, "
+                "%(session)s, %(regime)s, %(probability)s, %(meta_probability)s, %(confidence)s, NOW()"
+            )
+        else:
+            cols = (
+                "ticket_id, symbol, side, "
+                "entry_time, entry_price, stop_loss, take_profit, lot, risk_pct, "
+                "session, regime, probability, meta_probability, confidence, updated_at"
+            )
+            vals = (
+                "%(ticket_id)s, %(symbol)s, %(side)s, "
+                "%(entry_time)s, %(entry_price)s, %(stop_loss)s, %(take_profit)s, %(lot)s, %(risk_pct)s, "
+                "%(session)s, %(regime)s, %(probability)s, %(meta_probability)s, %(confidence)s, NOW()"
+            )
+        t = self._t("trades")
         sql = f"""
-        INSERT INTO {self._t("trades")} (
-            ticket_id, signal_id, correlation_id, symbol, side,
-            entry_time, entry_price, stop_loss, take_profit, lot, risk_pct,
-            session, regime, probability, meta_probability, confidence, updated_at
-        ) VALUES (
-            %(ticket_id)s, %(signal_id)s, %(correlation_id)s, %(symbol)s, %(side)s,
-            %(entry_time)s, %(entry_price)s, %(stop_loss)s, %(take_profit)s, %(lot)s, %(risk_pct)s,
-            %(session)s, %(regime)s, %(probability)s, %(meta_probability)s, %(confidence)s, NOW()
-        )
+        INSERT INTO {t} ({cols}) VALUES ({vals})
         ON CONFLICT (ticket_id) DO UPDATE SET
-            stop_loss = COALESCE(EXCLUDED.stop_loss, {self._t("trades")}.stop_loss),
-            take_profit = COALESCE(EXCLUDED.take_profit, {self._t("trades")}.take_profit),
+            stop_loss = COALESCE(EXCLUDED.stop_loss, {t}.stop_loss),
+            take_profit = COALESCE(EXCLUDED.take_profit, {t}.take_profit),
             updated_at = NOW()
         """
         self._execute(sql, payload)
@@ -223,17 +173,18 @@ class PostgresWriter:
             for key in self._EXIT_FIELDS:
                 if payload.get(key) is not None:
                     hist[key] = payload[key]
-            for key in (
-                "signal_id",
-                "correlation_id",
-                "session",
-                "regime",
-                "probability",
-                "meta_probability",
-                "confidence",
-            ):
-                if hist.get(key) is None and payload.get(key) is not None:
-                    hist[key] = payload[key]
+            if self.is_rich:
+                for key in (
+                    "signal_id",
+                    "correlation_id",
+                    "session",
+                    "regime",
+                    "probability",
+                    "meta_probability",
+                    "confidence",
+                ):
+                    if hist.get(key) is None and payload.get(key) is not None:
+                        hist[key] = payload[key]
             self._upsert_history_fill_empty(hist)
             self._delete_open_trade(ticket)
             return
@@ -251,19 +202,36 @@ class PostgresWriter:
             self._fill_history_exit_by_ticket(payload)
             return
         ht = self._t("history_trades")
+        if self.is_rich:
+            cols = (
+                "ticket_id, signal_id, correlation_id, symbol, side, "
+                "entry_time, exit_time, entry_price, exit_price, stop_loss, take_profit, "
+                "lot, risk_pct, pnl, pnl_r, duration_seconds, mae, mfe, exit_reason, "
+                "session, regime, probability, meta_probability, confidence, updated_at"
+            )
+            vals = (
+                "%(ticket_id)s, %(signal_id)s, %(correlation_id)s, %(symbol)s, %(side)s, "
+                "%(entry_time)s, %(exit_time)s, %(entry_price)s, %(exit_price)s, %(stop_loss)s, %(take_profit)s, "
+                "%(lot)s, %(risk_pct)s, %(pnl)s, %(pnl_r)s, %(duration_seconds)s, %(mae)s, %(mfe)s, "
+                "%(exit_reason)s, %(session)s, %(regime)s, %(probability)s, %(meta_probability)s, "
+                "%(confidence)s, NOW()"
+            )
+        else:
+            cols = (
+                "ticket_id, symbol, side, "
+                "entry_time, exit_time, entry_price, exit_price, stop_loss, take_profit, "
+                "lot, risk_pct, pnl, pnl_r, duration_seconds, mae, mfe, exit_reason, "
+                "session, regime, probability, meta_probability, confidence, updated_at"
+            )
+            vals = (
+                "%(ticket_id)s, %(symbol)s, %(side)s, "
+                "%(entry_time)s, %(exit_time)s, %(entry_price)s, %(exit_price)s, %(stop_loss)s, %(take_profit)s, "
+                "%(lot)s, %(risk_pct)s, %(pnl)s, %(pnl_r)s, %(duration_seconds)s, %(mae)s, %(mfe)s, "
+                "%(exit_reason)s, %(session)s, %(regime)s, %(probability)s, %(meta_probability)s, "
+                "%(confidence)s, NOW()"
+            )
         sql = f"""
-        INSERT INTO {ht} (
-            ticket_id, signal_id, correlation_id, symbol, side,
-            entry_time, exit_time, entry_price, exit_price, stop_loss, take_profit,
-            lot, risk_pct, pnl, pnl_r, duration_seconds, mae, mfe, exit_reason,
-            session, regime, probability, meta_probability, confidence, updated_at
-        ) VALUES (
-            %(ticket_id)s, %(signal_id)s, %(correlation_id)s, %(symbol)s, %(side)s,
-            %(entry_time)s, %(exit_time)s, %(entry_price)s, %(exit_price)s, %(stop_loss)s, %(take_profit)s,
-            %(lot)s, %(risk_pct)s, %(pnl)s, %(pnl_r)s, %(duration_seconds)s, %(mae)s, %(mfe)s,
-            %(exit_reason)s, %(session)s, %(regime)s, %(probability)s, %(meta_probability)s,
-            %(confidence)s, NOW()
-        )
+        INSERT INTO {ht} ({cols}) VALUES ({vals})
         ON CONFLICT (ticket_id) DO UPDATE SET
             exit_time = COALESCE({ht}.exit_time, EXCLUDED.exit_time),
             exit_price = COALESCE({ht}.exit_price, EXCLUDED.exit_price),
@@ -352,7 +320,6 @@ class PostgresWriter:
         return out
 
     def summarize_history(self) -> dict[str, Any]:
-        """Aggregate closed-trade PnL from history_trades."""
         empty = {"total_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
         if not self._enabled or self._psycopg2 is None:
             return empty
@@ -407,9 +374,134 @@ class PostgresWriter:
         payload["features"] = json.dumps(feats, default=str) if feats is not None else None
         self._execute(sql, payload)
 
-    # --- legacy no-ops (call sites may still exist briefly) ---
-    def ensure_ticket_id_column(self) -> None:
-        self.ensure_schema()
+    # --- testing-only observability ---
+
+    def upsert_signal(self, row: dict[str, Any]) -> None:
+        if not self.is_rich:
+            return
+        sql = f"""
+        INSERT INTO {self._t("signals")} (
+            signal_id, correlation_id, timestamp, symbol, side,
+            probability, meta_probability, confidence,
+            threshold_meta, threshold_confidence,
+            model_version, meta_version, feature_version, label_version, pipeline_version,
+            accepted, session, regime
+        ) VALUES (
+            %(signal_id)s, %(correlation_id)s, %(timestamp)s, %(symbol)s, %(side)s,
+            %(probability)s, %(meta_probability)s, %(confidence)s,
+            %(threshold_meta)s, %(threshold_confidence)s,
+            %(model_version)s, %(meta_version)s, %(feature_version)s, %(label_version)s, %(pipeline_version)s,
+            %(accepted)s, %(session)s, %(regime)s
+        )
+        ON CONFLICT (signal_id) DO UPDATE SET
+            accepted = EXCLUDED.accepted,
+            confidence = EXCLUDED.confidence
+        """
+        self._execute(sql, row)
+
+    def insert_skip(self, row: dict[str, Any]) -> None:
+        if not self.is_rich:
+            return
+        sql = f"""
+        INSERT INTO {self._t("skip_logs")} (
+            correlation_id, signal_id, timestamp, symbol, reason, threshold, current_value, detail
+        ) VALUES (
+            %(correlation_id)s, %(signal_id)s, %(timestamp)s, %(symbol)s, %(reason)s,
+            %(threshold)s, %(current_value)s, %(detail)s::jsonb
+        )
+        """
+        payload = dict(row)
+        payload["detail"] = json.dumps(payload.get("detail") or {}, default=str)
+        self._execute(sql, payload)
+
+    def insert_execution(self, row: dict[str, Any]) -> None:
+        if not self.is_rich:
+            return
+        payload = dict(row)
+        if payload.get("ticket_id") is None and payload.get("trade_id") is not None:
+            try:
+                payload["ticket_id"] = int(payload["trade_id"])
+            except (TypeError, ValueError):
+                payload["ticket_id"] = None
+        payload.setdefault("ticket_id", None)
+        sql = f"""
+        INSERT INTO {self._t("execution_logs")} (
+            correlation_id, ticket_id, timestamp, latency_ms, broker_response,
+            spread, slippage, retry_count, success, error_message
+        ) VALUES (
+            %(correlation_id)s, %(ticket_id)s, %(timestamp)s, %(latency_ms)s, %(broker_response)s,
+            %(spread)s, %(slippage)s, %(retry_count)s, %(success)s, %(error_message)s
+        )
+        """
+        self._execute(sql, payload)
+
+    def insert_audit(self, component: str, action: str, detail: dict, *, correlation_id: str | None = None) -> None:
+        if not self.is_rich:
+            return
+        sql = f"""
+        INSERT INTO {self._t("audit_logs")} (correlation_id, component, action, detail)
+        VALUES (%(correlation_id)s, %(component)s, %(action)s, %(detail)s::jsonb)
+        """
+        self._execute(
+            sql,
+            {
+                "correlation_id": correlation_id,
+                "component": component,
+                "action": action,
+                "detail": json.dumps(detail, default=str),
+            },
+        )
+
+    def upsert_daily(self, row: dict[str, Any]) -> None:
+        if not self.is_rich:
+            return
+        sql = f"""
+        INSERT INTO {self._t("daily_statistics")} (
+            date, equity, daily_r, drawdown, heat_triggered, trades, wins, winrate,
+            pnl, skipped, meta_rejects, confidence_rejects, updated_at
+        ) VALUES (
+            %(date)s, %(equity)s, %(daily_r)s, %(drawdown)s, %(heat_triggered)s, %(trades)s,
+            %(wins)s, %(winrate)s, %(pnl)s, %(skipped)s, %(meta_rejects)s, %(confidence_rejects)s, NOW()
+        )
+        ON CONFLICT (date) DO UPDATE SET
+            equity = EXCLUDED.equity,
+            daily_r = EXCLUDED.daily_r,
+            drawdown = EXCLUDED.drawdown,
+            heat_triggered = EXCLUDED.heat_triggered,
+            trades = EXCLUDED.trades,
+            wins = EXCLUDED.wins,
+            winrate = EXCLUDED.winrate,
+            pnl = EXCLUDED.pnl,
+            skipped = EXCLUDED.skipped,
+            meta_rejects = EXCLUDED.meta_rejects,
+            confidence_rejects = EXCLUDED.confidence_rejects,
+            updated_at = NOW()
+        """
+        self._execute(sql, row)
+
+    def insert_metric(
+        self,
+        name: str,
+        value: float,
+        *,
+        labels: dict | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        if not self.is_rich:
+            return
+        sql = f"""
+        INSERT INTO {self._t("metrics")} (name, value, labels, correlation_id)
+        VALUES (%(name)s, %(value)s, %(labels)s::jsonb, %(correlation_id)s)
+        """
+        self._execute(
+            sql,
+            {
+                "name": name,
+                "value": value,
+                "labels": json.dumps(labels or {}, default=str),
+                "correlation_id": correlation_id,
+            },
+        )
 
     def upsert_trade(self, row: dict[str, Any]) -> None:
         self.insert_open_trade(row)

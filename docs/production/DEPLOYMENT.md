@@ -39,6 +39,8 @@ python apps/run_paper_trading.py --apply-schema --mode replay --max-signals 1
 
 # Live / production
 python apps/run_live_trading.py --apply-schema
+# always real order_send (no --execute flag)
+python apps/run_live_trading.py
 ```
 
 Or:
