@@ -1,8 +1,7 @@
-"""CLI: Live trading runtime (production schema). Real MT5 order_send with --execute.
+"""CLI: Live trading runtime (production schema). Always real MT5 order_send.
 
 Examples:
-  python apps/run_live_trading.py              # dry-run orders
-  python apps/run_live_trading.py --execute    # REAL order_send
+  python apps/run_live_trading.py
   python apps/run_live_trading.py --apply-schema
 """
 
@@ -20,7 +19,7 @@ if str(_ROOT) not in sys.path:
 
 import tools.pyc_path_hook  # noqa: F401,E402
 
-from production import EXECUTION_ENABLED, LIVE_SYMBOL, RESEARCH_SYMBOL
+from production import LIVE_SYMBOL, RESEARCH_SYMBOL
 from production.live.account import fetch_account, snapshot_dict, sync_equity_into_state
 from production.live.broker import LiveBroker
 from production.live.signal_source import LiveMT5SignalSource
@@ -38,13 +37,8 @@ from settings.strategy import STARTING_EQUITY
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Live trading (production schema, real MT5 with --execute)")
+    p = argparse.ArgumentParser(description="Live trading (production schema, always real MT5 order_send)")
     p.add_argument("--config", type=Path, default=MT5_CONFIG)
-    p.add_argument(
-        "--execute",
-        action="store_true",
-        help="Actually call MT5 order_send (default is dry-run)",
-    )
     p.add_argument("--apply-schema", action="store_true")
     return p
 
@@ -55,7 +49,6 @@ def main(argv: list[str] | None = None) -> int:
     setup_json_logging()
     log = logging.getLogger(__name__)
 
-    # Prefer live_trading config; fall back to paper_trading section for telegram/dsn/poll
     live_section = dict(cfg.get("live_trading") or {})
     paper_cfg = dict(cfg.get("paper_trading") or {})
     rt_cfg = {**paper_cfg, **live_section}
@@ -81,16 +74,9 @@ def main(argv: list[str] | None = None) -> int:
     state = PortfolioState(equity=starting, peak_equity=starting)
     env_name = "live"
     trade_symbol = str(rt_cfg.get("symbol") or LIVE_SYMBOL)
-    do_execute = bool(args.execute) or bool(EXECUTION_ENABLED)
 
-    broker = LiveBroker(symbol=trade_symbol, execution_enabled=do_execute)
-    if do_execute:
-        log.warning("LIVE EXECUTION ENABLED — real MT5 order_send ON symbol=%s", trade_symbol)
-    else:
-        log.warning(
-            "LIVE dry-run symbol=%s — orders logged only (pass --execute to send real)",
-            trade_symbol,
-        )
+    broker = LiveBroker(symbol=trade_symbol, execution_enabled=True)
+    log.warning("LIVE EXECUTION ON — real MT5 order_send symbol=%s", trade_symbol)
 
     pipeline = ProductionPipeline(
         bus=bus,
@@ -142,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         n_rec = pipeline.recover_from_mt5(symbol=trade_symbol, db=db)
         if n_rec:
             print(f"recovered {n_rec} open MT5 position(s) — trail/reconcile active")
-        elif do_execute:
+        else:
             log.info("recover_none — no open positions with bot magic on %s", trade_symbol)
 
         runtime = PaperRuntime(
@@ -151,10 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             source=source,
             poll_seconds=float(live_cfg.get("poll_seconds", poll)),
         )
-        print(
-            f"LIVE on {trade_symbol} (models={RESEARCH_SYMBOL}, schema=production) — "
-            f"{'REAL order_send' if do_execute else 'DRY-RUN fills'}"
-        )
+        print(f"LIVE on {trade_symbol} (models={RESEARCH_SYMBOL}, schema=production) — REAL order_send")
         print(f"monitoring http://{mon_host}:{mon_port}/health")
         cmd_listener = start_telegram_commands(
             tg_cfg,
