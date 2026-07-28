@@ -483,7 +483,7 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("✅ Connected", text)
         self.assertIn("5h 32m", text)
         self.assertIn("2026-07-19 15:45:00 UTC", text)
-
+ 
     def test_fmt_health_mt5_down(self) -> None:
         text = fmt_health({"status": "degraded", "mt5": "down", "uptime": "1h 0m", "last_ping": "n/a"})
         self.assertIn("🟡 DEGRADED", text)
