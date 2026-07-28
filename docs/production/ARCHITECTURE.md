@@ -110,34 +110,34 @@ Default: `http://127.0.0.1:8787`
 | Daily | forum topic `daily_message_thread_id` — trades, W/L, skips, PnL %, uptime |
 | Health | forum topic `health_message_thread_id` — status, env, MT5, uptime |
 
-## Live mode (`--mode live`)
+## Paper vs live
 
-MT5 closed H1 bar → feature build → frozen Primary/Meta → paper fill (no `order_send`). Confidence still scored for logging but **not** used as a gate.
+- `apps/run_paper_trading.py` — schema `testing`, `PaperBroker` only (never MT5 `order_send`)
+- `apps/run_live_trading.py` — schema `production`, `LiveBroker` (`--execute` for real `order_send`)
+
+MT5 closed H1 bar → feature build → frozen Primary/Meta → fill.
 
 ```
 MT5 copy_rates (H1/H4/D1/M5)
   → LiveFeatureBuilder (L1)
   → FrozenStackInference (L3/L4 scores)
   → IncomingSignal
-  → TradingPipeline (Meta gate + expected_r sizing + PaperBroker)
+  → ProductionPipeline (Meta gate + sizing + broker)
 ```
 
 First run exports `artifacts/models/frozen/primary_{side}.txt` from historical parquet if missing.
 
-## PostgreSQL tables
+## PostgreSQL schemas
 
-See `sql/production_schema.sql`:
+Lean runtime tables (PK = `ticket_id`):
 
-- `trading.signals`
-- `trading.trades`
-- `trading.skip_logs`
-- `trading.execution_logs`
-- `trading.daily_statistics`
-- `trading.metrics`
-- `trading.audit_logs`
-- `trading.candles` — live OHLCV + feature snapshot (eval / Grafana)
+- `sql/testing_schema.sql` → `testing.trades` / `testing.history_trades` / `testing.candles`
+- `sql/production_schema.sql` → `production.trades` / `production.history_trades` / `production.candles`
+- `sql/research_schema.sql` → `research.wf_*` / `research.fs_*` / `research.exit_grid_*`
 
-Designed for Grafana panels: equity, winrate, PnL, latency, heat, skip reasons, spread/slippage.
+`/summary` command: balance & equity from MT5 `account_info`; total PnL / W/L from `history_trades`.
+
+Designed for Grafana: candles, open trades, closed history (PnL).
 
 ## Reliability
 

@@ -139,11 +139,12 @@ class LiveBroker:
         self.execution_enabled = EXECUTION_ENABLED if execution_enabled is None else bool(execution_enabled)
         self.deviation = int(deviation)
         self._paper = PaperBroker()  # dry-run / fallback simulator
-        self._tickets: dict[str, int] = {}  # trade_id → MT5 position ticket
+        self._tickets: dict[str, int] = {}  # str(ticket_id) → MT5 ticket
 
     def register_recovered(self, trade_id: str, ticket: int) -> None:
-        """Re-link trade_id ↔ MT5 ticket after process restart."""
-        self._tickets[str(trade_id)] = int(ticket)
+        """Re-link after restart — key is always str(ticket_id)."""
+        tid = int(ticket)
+        self._tickets[str(tid)] = tid
 
     def open_order(
         self,
@@ -193,7 +194,12 @@ class LiveBroker:
             )
             return self._paper.close_order(trade_id, exit_price)
 
-        ticket = self._tickets.get(trade_id)
+        ticket = self._tickets.get(str(trade_id))
+        if ticket is None:
+            try:
+                ticket = int(trade_id)
+            except (TypeError, ValueError):
+                ticket = None
         if ticket is None:
             return FillResult(
                 success=False,
@@ -206,15 +212,18 @@ class LiveBroker:
                 broker_response="NOT_FOUND",
                 error_message="no MT5 ticket for trade_id",
             )
-        return self._send_close(trade_id=trade_id, ticket=ticket)
+        return self._send_close(trade_id=str(ticket), ticket=int(ticket))
 
     def modify_stop_loss(self, trade_id: str, stop_loss: float) -> bool:
         """Push trailed SL to the open MT5 position (live execute only)."""
         if not self.execution_enabled:
             return False
-        ticket = self._tickets.get(trade_id)
+        ticket = self._tickets.get(str(trade_id))
         if not ticket:
-            return False
+            try:
+                ticket = int(trade_id)
+            except (TypeError, ValueError):
+                return False
         import MetaTrader5 as mt5
 
         from production.monitoring import mt5_session
@@ -285,6 +294,29 @@ class LiveBroker:
             )
         return out
 
+    def _resolve_open_ticket(self, *, trade_id: str, order_result: Any) -> int:
+        """Pick the MT5 position ticket for this fill — never first-magic-match."""
+        import MetaTrader5 as mt5
+
+        known = {int(t) for t in self._tickets.values() if t}
+        comment_tag = f"xauusd:{trade_id[:12]}"
+        positions = list(mt5.positions_get(symbol=self.symbol) or [])
+        magic_pos = [p for p in positions if int(getattr(p, "magic", 0)) == self.magic]
+
+        # 1) comment match (we set comment on order_send)
+        for pos in magic_pos:
+            if comment_tag in str(getattr(pos, "comment", "") or ""):
+                return int(pos.ticket)
+
+        # 2) newest unmatched magic position (hedging multi-open)
+        unmatched = [p for p in magic_pos if int(p.ticket) not in known]
+        if unmatched:
+            unmatched.sort(key=lambda p: int(getattr(p, "time_msc", 0) or getattr(p, "time", 0) or 0), reverse=True)
+            return int(unmatched[0].ticket)
+
+        # 3) deal/order ticket fallback
+        return int(getattr(order_result, "order", 0) or getattr(order_result, "deal", 0) or 0)
+
     def _send_open(
         self,
         *,
@@ -339,17 +371,14 @@ class LiveBroker:
             )
         ok = result.retcode == mt5.TRADE_RETCODE_DONE
         if ok:
-            self._tickets[trade_id] = int(result.order or result.deal or 0)
-            # Prefer position ticket if available
-            positions = mt5.positions_get(symbol=self.symbol) or []
-            for pos in positions:
-                if int(getattr(pos, "magic", 0)) == self.magic:
-                    self._tickets[trade_id] = int(pos.ticket)
-                    break
+            # Map THIS fill → position ticket (multi-open safe)
+            ticket = self._resolve_open_ticket(trade_id=trade_id, order_result=result)
+            key = str(ticket)
+            self._tickets[key] = ticket
             logger.info(
-                "LIVE open OK trade_id=%s ticket=%s price=%.2f lot=%.2f",
+                "LIVE open OK client_id=%s ticket=%s price=%.2f lot=%.2f",
                 trade_id,
-                self._tickets.get(trade_id),
+                ticket,
                 float(result.price or price),
                 lot,
             )
@@ -357,9 +386,11 @@ class LiveBroker:
         else:
             err_msg = _reject_message(int(result.retcode), result.comment, symbol=self.symbol)
             logger.error("LIVE open REJECT trade_id=%s %s", trade_id, err_msg)
+            key = trade_id
+            ticket = None
         return FillResult(
             success=ok,
-            trade_id=trade_id,
+            trade_id=key if ok else trade_id,
             fill_price=float(result.price or price),
             spread=0.0,
             slippage=0.0,
@@ -367,7 +398,7 @@ class LiveBroker:
             retry_count=0,
             broker_response=str(result.comment or result.retcode),
             error_message=err_msg,
-            broker_ticket=self._tickets.get(trade_id) if ok else None,
+            broker_ticket=ticket if ok else None,
         )
 
     def _send_close(self, *, trade_id: str, ticket: int) -> FillResult:

@@ -381,7 +381,7 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("Primary: 82.0%", text)
         self.assertIn("TRENDING BULLISH", text)
         self.assertIn("London", text)
-        self.assertIn("15:30 UTC", text)
+        self.assertIn("15:30:00 UTC", text)
         self.assertNotIn("Strategy", text)
         self.assertNotIn("Confidence", text)
 
@@ -431,7 +431,7 @@ class TelegramFmtTests(unittest.TestCase):
         self.assertIn("STOP LOSS", text)
         self.assertIn("Entry : 3382.50", text)
         self.assertIn("Exit  : 3376.50", text)
-        self.assertIn("17:44 UTC", text)
+        self.assertIn("17:44:00 UTC", text)
         self.assertNotIn("Reversal", text)
         self.assertNotIn("Strategy", text)
 
@@ -871,10 +871,11 @@ class LiveSourceTests(unittest.TestCase):
         )
         n = recover_positions_into_state(state, broker, [row], symbol="XAUUSDc")
         self.assertEqual(n, 1)
-        self.assertIn("recovered-abc-77", state.open_positions)
-        self.assertEqual(state.open_positions["recovered-abc-77"].broker_ticket, 77)
-        self.assertEqual(broker.tickets["recovered-abc-77"], 77)
-        self.assertTrue(state.open_positions["recovered-abc-77"].meta.get("recovered"))
+        self.assertIn("77", state.open_positions)
+        self.assertEqual(state.open_positions["77"].broker_ticket, 77)
+        self.assertEqual(state.open_positions["77"].signal_id, "recovered-abc-77")
+        self.assertEqual(broker.tickets["77"], 77)
+        self.assertTrue(state.open_positions["77"].meta.get("recovered"))
         # idempotent
         self.assertEqual(recover_positions_into_state(state, broker, [row], symbol="XAUUSDc"), 0)
 

@@ -115,7 +115,7 @@ def fetch_broker_open_positions(
 
 
 def enrich_with_db(rows: list[BrokerOpenPosition], db: Any, *, symbol: str) -> list[BrokerOpenPosition]:
-    """Prefer original trade_id / metadata from trading.trades.ticket_id when present."""
+    """Prefer original signal_id / metadata from {schema}.trades by ticket_id when present."""
     if not rows or db is None or not getattr(db, "enabled", False):
         return rows
     fetch = getattr(db, "fetch_open_trades_by_ticket", None)
@@ -173,17 +173,17 @@ def recover_positions_into_state(
     """Merge broker positions into PortfolioState; wire LiveBroker tickets."""
     n = 0
     for r in recovered:
-        if r.trade_id in state.open_positions:
-            logger.info("recover_skip_existing trade_id=%s ticket=%s", r.trade_id, r.broker_ticket)
+        ticket_key = str(r.broker_ticket)
+        if ticket_key in state.open_positions:
+            logger.info("recover_skip_existing ticket=%s", r.broker_ticket)
             continue
-        # same MT5 ticket already linked under another trade_id
         if any(int(p.broker_ticket or 0) == int(r.broker_ticket) for p in state.open_positions.values()):
             logger.info("recover_skip_ticket_dup ticket=%s", r.broker_ticket)
             continue
         atr = _atr_from_sl(side=r.side, entry=r.entry_price, stop_loss=r.stop_loss)
         corr = r.correlation_id or uuid.uuid4().hex
         pos = OpenPosition(
-            trade_id=r.trade_id,
+            trade_id=ticket_key,
             signal_id=str(r.signal_id or r.trade_id),
             side=r.side,
             entry_time=r.entry_time,
@@ -212,14 +212,13 @@ def recover_positions_into_state(
                 "confidence": r.confidence,
             },
         )
-        state.open_positions[r.trade_id] = pos
-        state.register_signal_key(r.trade_id)
+        state.open_positions[ticket_key] = pos
+        state.register_signal_key(str(r.signal_id or ticket_key))
         register = getattr(broker, "register_recovered", None)
         if callable(register):
-            register(r.trade_id, r.broker_ticket)
+            register(ticket_key, r.broker_ticket)
         logger.info(
-            "position_recovered trade_id=%s ticket=%s side=%s lot=%.2f entry=%.2f sl=%.2f from_db=%s",
-            r.trade_id,
+            "position_recovered ticket=%s side=%s lot=%.2f entry=%.2f sl=%.2f from_db=%s",
             r.broker_ticket,
             r.side,
             r.lot,

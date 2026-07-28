@@ -260,6 +260,7 @@ class ProductionPipeline:
                     EventType.EXECUTION_ERROR,
                     {
                         "trade_id": fill.trade_id,
+                        "ticket_id": fill.broker_ticket,
                         "error_message": fill.error_message,
                         "retry_count": fill.retry_count,
                         "latency_ms": fill.latency_ms,
@@ -270,10 +271,27 @@ class ProductionPipeline:
             )
             return {"status": "error", "correlation_id": corr, "error": fill.error_message}
 
+        if fill.broker_ticket is None:
+            self.bus.publish(
+                make_event(
+                    EventType.EXECUTION_ERROR,
+                    {
+                        "trade_id": fill.trade_id,
+                        "error_message": "missing ticket_id after fill",
+                        "broker_response": fill.broker_response,
+                    },
+                    correlation_id=corr,
+                )
+            )
+            return {"status": "error", "correlation_id": corr, "error": "missing ticket_id"}
+
+        ticket = int(fill.broker_ticket)
+        ticket_key = str(ticket)
+
         self.bus.publish(make_event(EventType.SIGNAL, {**base_signal, "accepted": True}, correlation_id=corr))
 
         pos = OpenPosition(
-            trade_id=fill.trade_id,
+            trade_id=ticket_key,
             signal_id=signal_id,
             side=side,
             entry_time=now,
@@ -284,7 +302,7 @@ class ProductionPipeline:
             risk_pct=risk_pct,
             atr=atr,
             correlation_id=corr,
-            broker_ticket=int(fill.broker_ticket) if fill.broker_ticket else None,
+            broker_ticket=ticket,
             extreme_fav=fill.fill_price,
             bars_held=0,
             meta={
@@ -308,14 +326,14 @@ class ProductionPipeline:
                 "initial_sl": sl,
             },
         )
-        self.state.open_positions[fill.trade_id] = pos
+        self.state.open_positions[ticket_key] = pos
         self.state.trades_today += 1
 
         self.bus.publish(
             make_event(
                 EventType.TRADE_OPENED,
                 {
-                    "trade_id": fill.trade_id,
+                    "trade_id": ticket_key,
                     "signal_id": signal_id,
                     "symbol": sig.symbol,
                     "side": side,
@@ -345,8 +363,8 @@ class ProductionPipeline:
                     "trail_atr_mult": TRAIL_ATR_MULT,
                     "trail_activate_r": TRAIL_ACTIVATE_R,
                     "environment": self.environment,
-                    "ticket_id": int(fill.broker_ticket) if fill.broker_ticket else None,
-                    "broker_ticket": int(fill.broker_ticket) if fill.broker_ticket else None,
+                    "ticket_id": ticket,
+                    "broker_ticket": ticket,
                 },
                 correlation_id=corr,
             )
@@ -354,11 +372,12 @@ class ProductionPipeline:
         self.bus.publish(
             make_event(
                 EventType.AUDIT,
-                {"component": "pipeline", "action": "trade_opened", "detail": {"trade_id": fill.trade_id}},
+                {"component": "pipeline", "action": "trade_opened", "detail": {"ticket_id": ticket}},
                 correlation_id=corr,
             )
         )
-        return {"status": "opened", "trade_id": fill.trade_id, "correlation_id": corr}
+        return {"status": "opened", "trade_id": ticket_key, "ticket_id": ticket, "correlation_id": corr}
+
 
     def _update_trail(self, pos: OpenPosition, *, high: float, low: float) -> bool:
         """Ratchet SL after +TRAIL_ACTIVATE_R using TRAIL_ATR_MULT. Returns True if SL moved."""
@@ -472,8 +491,8 @@ class ProductionPipeline:
             "equity": self.state.equity,
             "broker_response": broker_response,
             "environment": self.environment,
-            "ticket_id": int(pos.broker_ticket) if pos.broker_ticket else None,
-            "broker_ticket": int(pos.broker_ticket) if pos.broker_ticket else None,
+            "ticket_id": int(pos.broker_ticket) if pos.broker_ticket is not None else int(tid),
+            "broker_ticket": int(pos.broker_ticket) if pos.broker_ticket is not None else int(tid),
         }
         self.bus.publish(make_event(EventType.TRADE_CLOSED, payload, correlation_id=pos.correlation_id))
         return payload
@@ -497,6 +516,7 @@ class ProductionPipeline:
                         EventType.TRAIL_UPDATE,
                         {
                             "trade_id": tid,
+                            "ticket_id": int(pos.broker_ticket) if pos.broker_ticket is not None else None,
                             "signal_id": pos.signal_id,
                             "symbol": self.symbol,
                             "side": pos.side,

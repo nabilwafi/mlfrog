@@ -503,6 +503,7 @@ paper_trading:
   frozen_models_dir: ./artifacts/models/frozen
   # postgres_dsn: "postgresql://user:pass@localhost:5432/xauusd"
   postgres_dsn: "postgresql://trading:trading@localhost:5432/trading"
+  # Paper writes to Postgres schema `testing` (see sql/testing_schema.sql)
   telegram:
     enabled: true
     verify_ssl: true   # set false if CERTIFICATE_VERIFY_FAILED (corp proxy / AV MITM)
@@ -513,3 +514,10 @@ paper_trading:
     daily_message_thread_id: 4           # daily report topic (reuses chat_id)
     error_thread_id: 5                   # execution error topic (reuses chat_id)
     # only set health_chat_id / daily_chat_id / error_chat_id if those go to a different group
+
+# Live trading — production schema (sql/production_schema.sql); real order_send with --execute
+live_trading:
+  # inherits telegram/dsn from paper_trading if omitted
+  # postgres_dsn: "postgresql://trading:trading@localhost:5432/trading"
+  monitoring_port: 8788
+  # symbol: XAUUSDc   # defaults to production.LIVE_SYMBOL

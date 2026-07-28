@@ -196,14 +196,45 @@ def build_summary_check(
     state: Any,
     symbol: str,
     environment: str = "live",
+    db: Any | None = None,
+    use_mt5_account: bool = True,
 ) -> dict[str, Any]:
-    wins = int(getattr(state, "wins_today", 0) or 0)
-    trades = int(getattr(state, "trades_today", 0) or 0)
-    losses = max(0, trades - wins)
+    """Balance/equity from MT5 when available; total PnL / W/L from history_trades."""
+    balance = getattr(state, "balance", None)
+    equity = float(getattr(state, "equity", 0) or 0)
+    if use_mt5_account:
+        try:
+            from production.live.account import fetch_account
+
+            snap = fetch_account()
+            balance = float(snap.balance)
+            equity = float(snap.equity)
+        except Exception:
+            logger.exception("summary_mt5_account_failed — falling back to state")
+
+    hist = {"total_pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}
+    if db is not None and getattr(db, "enabled", False):
+        try:
+            hist = dict(db.summarize_history() or hist)
+        except Exception:
+            logger.exception("summary_history_failed")
+
+    # Prefer history aggregates; fall back to in-memory day counters
+    trades = int(hist.get("trades") or 0)
+    wins = int(hist.get("wins") or 0)
+    losses = int(hist.get("losses") or 0)
+    pnl = float(hist.get("total_pnl") or 0.0)
+    if trades <= 0:
+        wins = int(getattr(state, "wins_today", 0) or 0)
+        trades = int(getattr(state, "trades_today", 0) or 0)
+        losses = max(0, trades - wins)
+        pnl = float(getattr(state, "pnl_today", 0) or 0)
+
     running = len(getattr(state, "open_positions", {}) or {})
-    start_eq = float(getattr(state, "day_start_equity", 0) or getattr(state, "equity", 0) or 0)
-    pnl = float(getattr(state, "pnl_today", 0) or 0)
-    bal = getattr(state, "balance", None)
+    start_eq = float(getattr(state, "day_start_equity", 0) or equity or 0)
+    if balance is None:
+        balance = start_eq
+
     open_list = []
     for pos in (getattr(state, "open_positions", {}) or {}).values():
         open_list.append(
@@ -212,16 +243,17 @@ def build_summary_check(
                 "entry_price": pos.entry_price,
                 "stop_loss": pos.stop_loss,
                 "lot": pos.lot,
+                "ticket": getattr(pos, "broker_ticket", None),
             }
         )
     return {
         "symbol": symbol,
         "status": "ok",
         "environment": environment,
-        "balance": float(bal) if bal is not None else start_eq,
-        "equity": float(getattr(state, "equity", 0) or 0),
+        "balance": float(balance),
+        "equity": float(equity),
         "pnl": pnl,
-        "pnl_pct": (pnl / start_eq * 100.0) if start_eq > 0 else 0.0,
+        "pnl_pct": (pnl / float(balance) * 100.0) if float(balance or 0) > 0 else 0.0,
         "trades": trades,
         "wins": wins,
         "losses": losses,

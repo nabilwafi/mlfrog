@@ -12,7 +12,7 @@ from production import DAILY_LOSS_STOP_R, RISK_BASE
 
 @dataclass
 class OpenPosition:
-    trade_id: str
+    trade_id: str  # str(ticket_id) — primary runtime key
     signal_id: str
     side: str
     entry_time: datetime
@@ -23,13 +23,17 @@ class OpenPosition:
     risk_pct: float
     atr: float
     correlation_id: str
-    broker_ticket: int | None = None  # MT5 position ticket when live
+    broker_ticket: int | None = None  # ticket_id (MT5 or paper synthetic)
     meta: dict[str, Any] = field(default_factory=dict)
     mae: float = 0.0
     mfe: float = 0.0
     # trail exit state (ATR trail engine)
     extreme_fav: float = 0.0  # best favorable price seen
     bars_held: int = 0
+
+    @property
+    def ticket_id(self) -> int | None:
+        return int(self.broker_ticket) if self.broker_ticket is not None else None
 
 
 @dataclass

@@ -312,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.apply_schema:
         if not db.enabled:
             raise SystemExit("--apply-schema requires a working postgres_dsn (and not --no-db)")
-        schema = (_ROOT / "sql" / "research_wf_schema.sql").read_text(encoding="utf-8")
+        schema = (_ROOT / "sql" / "research_schema.sql").read_text(encoding="utf-8")
         db.apply_schema(schema)
         print("schema applied: research.wf_*")
         return 0

@@ -1,4 +1,4 @@
--- Research rolling walk-forward schema (PostgreSQL).
+﻿-- Research rolling walk-forward schema (PostgreSQL).
 -- Source of truth for training + OOS backtest history. No CSV required.
 
 CREATE SCHEMA IF NOT EXISTS research;
@@ -125,3 +125,78 @@ CREATE TABLE IF NOT EXISTS research.wf_equity (
 
 CREATE INDEX IF NOT EXISTS idx_wf_equity_run ON research.wf_equity (run_id, scope);
 CREATE INDEX IF NOT EXISTS idx_wf_equity_ts ON research.wf_equity (timestamp);
+-- Feature selection / ablation experiments (research only). Does not touch production trading tables.
+
+CREATE SCHEMA IF NOT EXISTS research;
+
+CREATE TABLE IF NOT EXISTS research.fs_runs (
+    run_id          TEXT PRIMARY KEY,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status          TEXT NOT NULL DEFAULT 'running',
+    baseline_pf     DOUBLE PRECISION,
+    baseline_return DOUBLE PRECISION,
+    baseline_dd     DOUBLE PRECISION,
+    notes           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research.fs_experiments (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          TEXT NOT NULL REFERENCES research.fs_runs(run_id) ON DELETE CASCADE,
+    phase           TEXT NOT NULL,  -- ranking|single_ablation|group_ablation|forward|backward|compare
+    experiment_id   TEXT NOT NULL,
+    features_json   JSONB NOT NULL,
+    n_features      INTEGER NOT NULL,
+    removed_feature TEXT,
+    removed_group   TEXT,
+    n_trades        INTEGER,
+    win_rate        DOUBLE PRECISION,
+    profit_factor   DOUBLE PRECISION,
+    total_return    DOUBLE PRECISION,
+    max_drawdown    DOUBLE PRECISION,
+    final_equity    DOUBLE PRECISION,
+    roc_auc         DOUBLE PRECISION,
+    avg_pr          DOUBLE PRECISION,
+    metrics         JSONB,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (run_id, phase, experiment_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fs_experiments_run ON research.fs_experiments (run_id, phase);
+-- Exit engine grid search (append-only; no overwrite)
+CREATE SCHEMA IF NOT EXISTS research;
+
+CREATE TABLE IF NOT EXISTS research.exit_grid_runs (
+    run_id      TEXT PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status      TEXT NOT NULL,
+    n_combos    INTEGER,
+    features    JSONB,
+    notes       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research.exit_grid_results (
+    run_id          TEXT NOT NULL REFERENCES research.exit_grid_runs(run_id) ON DELETE CASCADE,
+    combo_id        TEXT NOT NULL,
+    params          JSONB NOT NULL,
+    n_trades        INTEGER,
+    win_rate        DOUBLE PRECISION,
+    profit_factor   DOUBLE PRECISION,
+    total_return    DOUBLE PRECISION,
+    max_drawdown    DOUBLE PRECISION,
+    final_equity    DOUBLE PRECISION,
+    avg_win         DOUBLE PRECISION,
+    avg_loss        DOUBLE PRECISION,
+    avg_r           DOUBLE PRECISION,
+    expectancy_r    DOUBLE PRECISION,
+    avg_mfe_r       DOUBLE PRECISION,
+    avg_mae_r       DOUBLE PRECISION,
+    exit_reasons    JSONB,
+    yearly          JSONB,
+    years_positive  INTEGER,
+    ret_2026        DOUBLE PRECISION,
+    robustness      DOUBLE PRECISION,
+    PRIMARY KEY (run_id, combo_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exit_grid_results_rank
+    ON research.exit_grid_results (run_id, profit_factor DESC, max_drawdown ASC);

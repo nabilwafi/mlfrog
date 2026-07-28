@@ -593,7 +593,7 @@ def main(argv: list[str] | None = None) -> int:
     db = ExitGridWriter(str(dsn) if dsn else None)
 
     if args.apply_schema:
-        db.apply_schema((_ROOT / "sql" / "research_exit_grid_schema.sql").read_text(encoding="utf-8"))
+        db.apply_schema((_ROOT / "sql" / "research_schema.sql").read_text(encoding="utf-8"))
         print("schema applied: research.exit_grid_*")
         return 0
 

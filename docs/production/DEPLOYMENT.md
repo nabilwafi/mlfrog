@@ -34,13 +34,19 @@ Leave telegram `enabled: false` until credentials are set.
 ## Apply schema
 
 ```bash
+# Paper / testing
 python apps/run_paper_trading.py --apply-schema --mode replay --max-signals 1
+
+# Live / production
+python apps/run_live_trading.py --apply-schema
 ```
 
 Or:
 
 ```bash
+psql "$POSTGRES_DSN" -f sql/testing_schema.sql
 psql "$POSTGRES_DSN" -f sql/production_schema.sql
+psql "$POSTGRES_DSN" -f sql/research_schema.sql
 ```
 
 ## Validate infrastructure (replay)

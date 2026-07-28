@@ -1,17 +1,13 @@
-"""CLI: Production paper / live trading runtime.
+"""CLI: Paper trading runtime (testing schema). Never real MT5 order_send.
 
 Modes:
   replay  — dry replay from heat trades parquet (no MT5)
   loop    — idle loop + monitoring only
-  paper   — MT5 candles + frozen stack + paper fills  (formerly --mode live)
-  live    — MT5 candles + broker equity + LiveBroker
-            (order_send ONLY when --execute / EXECUTION_ENABLED=True)
+  paper   — MT5 candles + frozen stack + paper fills
 
 Examples:
   python apps/run_paper_trading.py --mode replay --max-signals 20
   python apps/run_paper_trading.py --mode paper
-  python apps/run_paper_trading.py --mode live            # dry-run orders
-  python apps/run_paper_trading.py --mode live --execute  # REAL orders
 """
 
 from __future__ import annotations
@@ -28,16 +24,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# Source-stripped packages (feature_engineering, etc.) load from __pycache__ via this hook.
 import tools.pyc_path_hook  # noqa: F401,E402
 
-import yaml
-
-from production import EXECUTION_ENABLED, LIVE_SYMBOL, RESEARCH_SYMBOL, USE_ACCOUNT_EQUITY
-from production.db.writer import PostgresWriter
-from production.events.bus import EventBus, MetricsCollector
+from production import RESEARCH_SYMBOL, USE_ACCOUNT_EQUITY
 from production.live.account import fetch_account, snapshot_dict, sync_equity_into_state
-from production.live.broker import LiveBroker
 from production.live.signal_source import LiveMT5SignalSource
 from production.logging.structured import setup_json_logging
 from production.monitoring.health import HealthReporter
@@ -48,107 +38,19 @@ from production.paper.broker import PaperBroker
 from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.runtime import IdleSignalSource, PaperRuntime, ReplaySignalSource
 from production.paper.state import PortfolioState
-from production.telegram.bot import TelegramNotifier, split_chat_and_thread
-from production.telegram.commands import (
-    TelegramCommandListener,
-    build_candle_check,
-    build_positions_check,
-    build_summary_check,
-)
-from production.workers.handlers import register_workers
-from settings.paths import MT5_CONFIG, MT5_CONFIG_EXAMPLE, PAPER, ROOT
+from production.runtime_cli import load_config, start_stack, start_telegram_commands
+from settings.paths import MT5_CONFIG, PAPER, ROOT
 from settings.strategy import STARTING_EQUITY
 
 
-def _trade_thread_id(tg_cfg: dict[str, Any]) -> Any:
-    """Prefer trade_thread_id; fall back to legacy message_thread_id."""
-    if tg_cfg.get("trade_thread_id") is not None:
-        return tg_cfg.get("trade_thread_id")
-    return tg_cfg.get("message_thread_id")
-
-
-def _build_telegram(tg_cfg: dict[str, Any], *, chat_key: str, thread_key: str) -> TelegramNotifier:
-    """Build notifier; supports forum topics via trade/health/daily thread ids."""
-    enabled = bool(tg_cfg.get("enabled", False))
-    token = tg_cfg.get("bot_token")
-    raw_chat = tg_cfg.get(chat_key)
-    # allow shorthand chat_id:thread in the chat field
-    chat_id, thread_from_chat = split_chat_and_thread(str(raw_chat) if raw_chat is not None else None)
-    if thread_key in {"trade_thread_id", "message_thread_id"}:
-        thread = _trade_thread_id(tg_cfg)
-    else:
-        thread = tg_cfg.get(thread_key)
-    if thread is None:
-        thread = thread_from_chat
-    # health/daily fall back to main chat_id if dedicated chat omitted
-    if chat_key != "chat_id" and not chat_id:
-        chat_id, _ = split_chat_and_thread(str(tg_cfg.get("chat_id") or "") or None)
-    return TelegramNotifier(
-        token,
-        chat_id,
-        message_thread_id=thread,
-        enabled=enabled and bool(chat_id),
-        verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
-    )
-
-
-def _start_telegram_commands(
-    tg_cfg: dict[str, Any],
-    *,
-    cfg: dict[str, Any],
-    state: PortfolioState,
-    symbol: str,
-    timeframe: str,
-    environment: str,
-    verify_ssl: bool = True,
-) -> TelegramCommandListener | None:
-    if not bool(tg_cfg.get("enabled")) or not tg_cfg.get("bot_token"):
-        return None
-    allowed: set[str] = set()
-    for key in ("chat_id", "health_chat_id", "daily_chat_id", "error_chat_id"):
-        cid, _ = split_chat_and_thread(str(tg_cfg.get(key) or "") or None)
-        if cid:
-            allowed.add(cid)
-    if not allowed:
-        return None
-    primary = next(iter(sorted(allowed)))
-    tg = TelegramNotifier(
-        tg_cfg.get("bot_token"),
-        primary,
-        enabled=True,
-        verify_ssl=verify_ssl,
-    )
-    tf = str(timeframe or "H1").upper()
-
-    def on_candle() -> dict[str, Any]:
-        return build_candle_check(cfg=cfg, symbol=symbol, timeframe=tf)
-
-    def on_summary() -> dict[str, Any]:
-        return build_summary_check(state=state, symbol=symbol, environment=environment)
-
-    def on_positions() -> dict[str, Any]:
-        return build_positions_check(cfg=cfg, state=state, symbol=symbol, timeframe=tf)
-
-    listener = TelegramCommandListener(
-        tg,
-        allowed_chat_ids=allowed,
-        on_check_candle=on_candle,
-        on_check_summary=on_summary,
-        on_check_positions=on_positions,
-    )
-    listener.start()
-    print(f"telegram commands: /candles /summary /positions (chats={len(allowed)})")
-    return listener
-
-
-def _load_config(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        raise FileNotFoundError(f"config not found: {path} (copy {MT5_CONFIG_EXAMPLE.name})")
-    with path.open(encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-    if not isinstance(data, dict):
-        raise ValueError("config root must be a mapping")
-    return data
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Paper trading (testing schema, never MT5 execute)")
+    p.add_argument("--config", type=Path, default=MT5_CONFIG)
+    p.add_argument("--mode", choices=("replay", "loop", "paper"), default="replay")
+    p.add_argument("--max-signals", type=int, default=50)
+    p.add_argument("--heat-trades", type=Path, default=None)
+    p.add_argument("--apply-schema", action="store_true")
+    return p
 
 
 def _resolve(path: str) -> Path:
@@ -160,7 +62,6 @@ def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[Incoming
     import pandas as pd
 
     df = pd.read_parquet(heat_path)
-    # Prefer accepted heat trades for infrastructure validation; include some skips via meta/conf
     rows = df.sort_values("timestamp").reset_index(drop=True)
     if limit:
         rows = rows.head(limit)
@@ -198,30 +99,11 @@ def _load_replay_signals(heat_path: Path, *, limit: int | None) -> list[Incoming
     return out
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Production paper / live trading")
-    p.add_argument("--config", type=Path, default=MT5_CONFIG)
-    p.add_argument(
-        "--mode",
-        choices=("replay", "loop", "paper", "live"),
-        default="replay",
-        help="paper = MT5+paper fills (old 'live'); live = broker equity + LiveBroker",
-    )
-    p.add_argument(
-        "--execute",
-        action="store_true",
-        help="LIVE ONLY: actually call MT5 order_send (default is dry-run)",
-    )
-    p.add_argument("--max-signals", type=int, default=50)
-    p.add_argument("--heat-trades", type=Path, default=None)
-    p.add_argument("--apply-schema", action="store_true")
-    return p
-
-
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    cfg = _load_config(Path(args.config))
+    cfg = load_config(Path(args.config))
     setup_json_logging()
+    log = logging.getLogger(__name__)
 
     paper_cfg = dict(cfg.get("paper_trading") or {})
     starting = float(paper_cfg.get("starting_equity", STARTING_EQUITY))
@@ -229,142 +111,23 @@ def main(argv: list[str] | None = None) -> int:
     mon_host = str(paper_cfg.get("monitoring_host", "127.0.0.1"))
     mon_port = int(paper_cfg.get("monitoring_port", 8787))
     bus_workers = int(paper_cfg.get("event_workers", 2))
-
     tg_cfg = dict(paper_cfg.get("telegram") or {})
     db_dsn = paper_cfg.get("postgres_dsn")
 
-    bus = EventBus(maxsize=int(paper_cfg.get("event_queue_size", 10_000)))
-    metrics = MetricsCollector()
-    db = PostgresWriter(str(db_dsn) if db_dsn else None)
-    log = logging.getLogger(__name__)
-    if db_dsn and not db.enabled:
-        log.error(
-            "postgres_disabled — DSN set but writer off (install: pip install psycopg2-binary). "
-            "Candles/signals will NOT be written to DB."
-        )
-    elif not db_dsn:
-        log.warning("postgres_dsn empty — DB writes no-op")
-    else:
-        log.info("postgres_enabled dsn_host=%s", str(db_dsn).split("@")[-1] if "@" in str(db_dsn) else "set")
-    telegram = _build_telegram(tg_cfg, chat_key="chat_id", thread_key="trade_thread_id")
-    health_telegram = _build_telegram(
-        tg_cfg,
-        chat_key="health_chat_id",
-        thread_key="health_message_thread_id",
+    bus, metrics, db, telegram, *_ = start_stack(
+        dsn=str(db_dsn) if db_dsn else None,
+        schema="testing",
+        schema_sql_name="testing_schema.sql",
+        apply_schema=bool(args.apply_schema),
+        tg_cfg=tg_cfg,
+        bus_workers=bus_workers,
+        queue_size=int(paper_cfg.get("event_queue_size", 10_000)),
     )
-    daily_telegram = _build_telegram(
-        tg_cfg,
-        chat_key="daily_chat_id",
-        thread_key="daily_message_thread_id",
-    )
-    error_telegram = _build_telegram(
-        tg_cfg,
-        chat_key="error_chat_id",
-        thread_key="error_thread_id",
-    )
-    trade_thread = _trade_thread_id(tg_cfg)
-    # if dedicated chat missing, reuse trade chat + topic thread (or trade thread)
-    if not health_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
-        health_telegram = TelegramNotifier(
-            tg_cfg.get("bot_token"),
-            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
-            message_thread_id=tg_cfg.get("health_message_thread_id") or trade_thread,
-            enabled=True,
-            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
-        )
-    if not daily_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
-        daily_telegram = TelegramNotifier(
-            tg_cfg.get("bot_token"),
-            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
-            message_thread_id=tg_cfg.get("daily_message_thread_id") or trade_thread,
-            enabled=True,
-            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
-        )
-    if not error_telegram.enabled and bool(tg_cfg.get("enabled")) and tg_cfg.get("chat_id"):
-        error_telegram = TelegramNotifier(
-            tg_cfg.get("bot_token"),
-            split_chat_and_thread(str(tg_cfg.get("chat_id")))[0],
-            message_thread_id=tg_cfg.get("error_thread_id") or trade_thread,
-            enabled=True,
-            verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
-        )
-    if not telegram.enabled:
-        log.warning(
-            "telegram_disabled — set paper_trading.telegram chat_id (+ optional trade_thread_id for topics)",
-        )
-    if not health_telegram.enabled:
-        log.warning(
-            "health_telegram_disabled — set health_chat_id / health_message_thread_id for HEALTHCHECK topic",
-        )
-    if not daily_telegram.enabled:
-        log.warning(
-            "daily_telegram_disabled — set daily_message_thread_id for DAILY REPORT topic",
-        )
-    if not error_telegram.enabled:
-        log.warning(
-            "error_telegram_disabled — set error_thread_id for EXECUTION ERROR topic",
-        )
-    else:
-        log.info(
-            "telegram_ready trades_chat=%s trade_thread=%s health_thread=%s daily_thread=%s error_thread=%s",
-            tg_cfg.get("chat_id"),
-            trade_thread,
-            tg_cfg.get("health_message_thread_id"),
-            tg_cfg.get("daily_message_thread_id"),
-            tg_cfg.get("error_thread_id"),
-        )
-    register_workers(
-        bus,
-        db=db,
-        telegram=telegram,
-        metrics=metrics,
-        health_telegram=health_telegram,
-        daily_telegram=daily_telegram,
-        error_telegram=error_telegram,
-    )
-    bus.start(n_workers=bus_workers)
-
-    if args.apply_schema and db.enabled:
-        schema = (ROOT / "sql" / "production_schema.sql").read_text(encoding="utf-8")
-        db.apply_schema(schema)
-        print("schema applied")
-    elif db.enabled:
-        # ponytail: keep ticket_id available without full re-apply
-        try:
-            db.ensure_ticket_id_column()
-        except Exception:
-            log.exception("ensure_ticket_id_column_failed")
 
     state = PortfolioState(equity=starting, peak_equity=starting)
-    # paper = old live (MT5 candles + paper fills); live = broker equity + LiveBroker
-    if args.mode == "live":
-        env_name = "live"
-    elif args.mode == "paper":
-        env_name = "paper"
-    else:
-        env_name = str(paper_cfg.get("environment") or "paper")
-
-    do_execute = bool(args.execute) or bool(EXECUTION_ENABLED)
-    # live → HF cent symbol XAUUSDC; paper/replay keep cfg/research symbol
-    trade_symbol = LIVE_SYMBOL if args.mode == "live" else str(cfg.get("symbol", RESEARCH_SYMBOL))
-    if args.mode == "live":
-        broker: PaperBroker | LiveBroker = LiveBroker(
-            symbol=trade_symbol,
-            execution_enabled=do_execute,
-        )
-        if do_execute:
-            log.warning(
-                "LIVE EXECUTION ENABLED — real MT5 order_send ON symbol=%s",
-                trade_symbol,
-            )
-        else:
-            log.warning(
-                "LIVE dry-run symbol=%s — orders logged only (pass --execute to send real)",
-                trade_symbol,
-            )
-    else:
-        broker = PaperBroker()
-
+    env_name = "paper"
+    trade_symbol = str(cfg.get("symbol", RESEARCH_SYMBOL))
+    broker = PaperBroker()
     pipeline = ProductionPipeline(
         bus=bus,
         state=state,
@@ -385,27 +148,26 @@ def main(argv: list[str] | None = None) -> int:
         host=mon_host, port=mon_port, metrics=metrics, state=state, bus=bus, health=health
     )
     health.start()
-
     PAPER.mkdir(parents=True, exist_ok=True)
 
     try:
         if args.mode == "replay":
-            heat_root = _resolve(str((cfg.get("portfolio_heat") or {}).get("output_directory", "artifacts/research/portfolio_heat")))
+            heat_root = _resolve(
+                str((cfg.get("portfolio_heat") or {}).get("output_directory", "artifacts/research/portfolio_heat"))
+            )
             heat_path = Path(args.heat_trades) if args.heat_trades else heat_root / "best_policy_trades.parquet"
             if not heat_path.is_file():
                 raise FileNotFoundError(f"missing {heat_path}")
             signals = _load_replay_signals(heat_path, limit=args.max_signals)
             source = ReplaySignalSource(signals)
-            # drain all signals then stop
             while not source.exhausted:
                 for sig in source.next_signals():
                     pipeline.process_signal(sig)
-            # close remaining on last known prices (mark flat close)
             now = datetime.now(timezone.utc)
             for tid, pos in list(state.open_positions.items()):
                 pipeline.on_bar(high=pos.entry_price, low=pos.entry_price, close=pos.entry_price, timestamp=now)
             pipeline.emit_daily_summary()
-            time.sleep(0.5)  # allow workers to drain
+            time.sleep(0.5)
             snap = metrics.snapshot()
             (PAPER / "last_replay_metrics.json").write_text(
                 __import__("json").dumps({"equity": state.equity, "metrics": snap}, indent=2, default=str),
@@ -413,18 +175,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"replay done equity={state.equity:.2f} opened_keys={state.trades_today} skips={state.skips}")
             print(f"monitoring was on http://{mon_host}:{mon_port}/metrics")
-        elif args.mode in ("paper", "live"):
+        elif args.mode == "paper":
             live_cfg = dict(paper_cfg.get("live") or paper_cfg.get("paper") or {})
             source = LiveMT5SignalSource(
                 cfg,
                 symbol=trade_symbol,
                 timeframe=str(live_cfg.get("timeframe", cfg.get("timeframe", "H1"))),
                 history_bars=int(live_cfg.get("history_bars", 400)),
-                model_symbol=RESEARCH_SYMBOL if args.mode == "live" else trade_symbol,
+                model_symbol=trade_symbol,
             )
             source.connect()
-            # Sync broker equity before the loop (live always; paper if flag on)
-            if args.mode == "live" or USE_ACCOUNT_EQUITY:
+            if USE_ACCOUNT_EQUITY:
                 try:
                     snap = fetch_account()
                     sync_equity_into_state(state, snap)
@@ -434,18 +195,10 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     print(
                         f"account login={snap.login} server={snap.server} "
-                        f"equity=${snap.equity:.2f} balance=${snap.balance:.2f} "
-                        f"lev=1:{snap.leverage:g} free_margin=${snap.free_margin:.2f}"
+                        f"equity=${snap.equity:.2f} balance=${snap.balance:.2f}"
                     )
                 except Exception as exc:
                     log.exception("account_sync_failed err=%s — using starting_equity=%.2f", exc, starting)
-
-            if args.mode == "live":
-                n_rec = pipeline.recover_from_mt5(symbol=trade_symbol, db=db)
-                if n_rec:
-                    print(f"recovered {n_rec} open MT5 position(s) — trail/reconcile active")
-                elif do_execute:
-                    log.info("recover_none — no open positions with bot magic on %s", trade_symbol)
 
             runtime = PaperRuntime(
                 pipeline=pipeline,
@@ -453,24 +206,18 @@ def main(argv: list[str] | None = None) -> int:
                 source=source,
                 poll_seconds=float(live_cfg.get("poll_seconds", poll)),
             )
-            if args.mode == "live":
-                print(
-                    f"LIVE on {trade_symbol} (models={RESEARCH_SYMBOL}) — "
-                    f"broker equity + {'REAL order_send' if do_execute else 'DRY-RUN fills'}"
-                )
-            else:
-                print(
-                    f"PAPER on {trade_symbol} — MT5 candles + frozen stack + paper fills"
-                )
+            print(f"PAPER on {trade_symbol} — MT5 candles + paper fills (schema=testing)")
             print(f"monitoring http://{mon_host}:{mon_port}/health")
-            cmd_listener = _start_telegram_commands(
+            cmd_listener = start_telegram_commands(
                 tg_cfg,
                 cfg=cfg,
                 state=state,
+                db=db,
                 symbol=trade_symbol,
                 timeframe=str(live_cfg.get("timeframe", cfg.get("timeframe", "H1"))),
                 environment=env_name,
                 verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+                use_mt5_account=True,
             )
             try:
                 runtime.run_forever()
@@ -485,14 +232,16 @@ def main(argv: list[str] | None = None) -> int:
                 poll_seconds=poll,
             )
             print(f"paper loop listening; monitoring http://{mon_host}:{mon_port}/health")
-            cmd_listener = _start_telegram_commands(
+            cmd_listener = start_telegram_commands(
                 tg_cfg,
                 cfg=cfg,
                 state=state,
+                db=db,
                 symbol=trade_symbol,
                 timeframe=str(cfg.get("timeframe", "H1")),
                 environment=env_name,
                 verify_ssl=bool(tg_cfg.get("verify_ssl", True)),
+                use_mt5_account=False,
             )
             try:
                 runtime.run_forever()
