@@ -656,10 +656,14 @@ def fmt_daily(p: dict[str, Any]) -> str:
     wins = int(p.get("wins") or 0)
     losses = p.get("losses")
     if losses is None:
-        losses = max(0, trades - wins)
+        # never treat open trades as losses
+        losses = 0
+    else:
+        losses = int(losses)
     wr = p.get("winrate")
     if wr is None:
-        wr = (wins / trades) if trades else 0.0
+        closed = wins + int(losses)
+        wr = (wins / closed) if closed else 0.0
     try:
         wr_pct = float(wr) * 100.0 if float(wr) <= 1.0 else float(wr)
     except (TypeError, ValueError):

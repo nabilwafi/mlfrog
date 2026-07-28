@@ -456,6 +456,8 @@ class ProductionPipeline:
         self.state.apply_pnl(pnl)
         if pnl > 0:
             self.state.wins_today += 1
+        else:
+            self.state.losses_today += 1
         del self.state.open_positions[tid]
         duration = int((timestamp - pos.entry_time).total_seconds())
         payload: dict[str, Any] = {
@@ -614,10 +616,12 @@ class ProductionPipeline:
             self.state.day = now.date()
             if self.state.day_start_equity <= 0:
                 self.state.day_start_equity = float(self.state.equity)
-        trades = int(self.state.trades_today)
+        # W/L only from closed trades — open/running positions are R, not L
         wins = int(self.state.wins_today)
-        losses = max(0, trades - wins)
-        wr = (wins / trades) if trades else 0.0
+        losses = int(self.state.losses_today)
+        closed = wins + losses
+        trades = closed
+        wr = (wins / closed) if closed else 0.0
         start_eq = float(self.state.day_start_equity or self.state.equity)
         pnl = float(self.state.pnl_today)
         pnl_pct = (pnl / start_eq * 100.0) if start_eq > 0 else 0.0

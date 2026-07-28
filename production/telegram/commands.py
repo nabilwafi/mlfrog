@@ -219,15 +219,15 @@ def build_summary_check(
         except Exception:
             logger.exception("summary_history_failed")
 
-    # Prefer history aggregates; fall back to in-memory day counters
+    # Prefer history aggregates; fall back to in-memory closed-only counters
     trades = int(hist.get("trades") or 0)
     wins = int(hist.get("wins") or 0)
     losses = int(hist.get("losses") or 0)
     pnl = float(hist.get("total_pnl") or 0.0)
     if trades <= 0:
         wins = int(getattr(state, "wins_today", 0) or 0)
-        trades = int(getattr(state, "trades_today", 0) or 0)
-        losses = max(0, trades - wins)
+        losses = int(getattr(state, "losses_today", 0) or 0)
+        trades = wins + losses  # open/running excluded from W/L
         pnl = float(getattr(state, "pnl_today", 0) or 0)
 
     running = len(getattr(state, "open_positions", {}) or {})

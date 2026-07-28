@@ -53,6 +53,7 @@ class PortfolioState:
     skips: int = 0
     trades_today: int = 0
     wins_today: int = 0
+    losses_today: int = 0
     pnl_today: float = 0.0
     best_trade_pnl_today: float | None = None
     worst_trade_pnl_today: float | None = None
@@ -74,6 +75,7 @@ class PortfolioState:
             self.skips = 0
             self.trades_today = 0
             self.wins_today = 0
+            self.losses_today = 0
             self.pnl_today = 0.0
             self.best_trade_pnl_today = None
             self.worst_trade_pnl_today = None
