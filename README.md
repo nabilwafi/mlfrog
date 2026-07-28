@@ -48,7 +48,7 @@ python apps/report_edge_attribution.py
 python apps/report_feature_library_research.py
 ```
 
-Schema: `sql/research_wf_schema.sql` → `research.wf_*`  
+Schema: `sql/research_schema.sql` → `research.wf_*` / `research.fs_*` / `research.exit_grid_*`  
 Debug panels: `artifacts/pipeline_backtest/rolling_wf/`
 
 Sim helpers (trail / ruin-stop portfolio): `simulation/wf/sim.py`
@@ -56,17 +56,21 @@ Sim helpers (trail / ruin-stop portfolio): `simulation/wf/sim.py`
 ## Paper / live
 
 ```bash
-# Replay / paper (MT5 candles, simulated fills)
+# Paper — testing schema, simulated fills (never MT5 order_send)
 python apps/run_paper_trading.py --mode replay --max-signals 50
-python apps/run_paper_trading.py --mode paper
+python apps/run_paper_trading.py --mode paper --apply-schema
 
-# Live account sync; add --execute only when ready for real orders
-python apps/run_paper_trading.py --mode live
+# Live — production schema; add --execute only when ready for real orders
+python apps/run_live_trading.py
+python apps/run_live_trading.py --execute --apply-schema
 ```
 
-Schema: `sql/production_schema.sql`  
+Schemas:
+- `sql/testing_schema.sql` → `testing.trades` / `history_trades` / `candles` (PK `ticket_id`)
+- `sql/production_schema.sql` → `production.*` (same lean shape)
+
 Monitoring: `http://<LAN-IP>:8787/health` · `/metrics` · `/portfolio`
 
 ```bash
-python -m unittest tests.test_paper_production -v
+python -m unittest tests.test_paper_production tests.test_trade_history -v
 ```

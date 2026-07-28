@@ -1,9 +1,9 @@
--- Live trading schema (real MT5 order_send). Lean: candles + open trades + history.
--- PK for trades/history = ticket_id (MT5 position ticket).
+-- Paper trading schema (MT5 candles OK; fills simulated — never real order_send).
+-- Same lean shape as production; PK = ticket_id (synthetic paper ticket).
 
-CREATE SCHEMA IF NOT EXISTS production;
+CREATE SCHEMA IF NOT EXISTS testing;
 
-CREATE TABLE IF NOT EXISTS production.trades (
+CREATE TABLE IF NOT EXISTS testing.trades (
     ticket_id           BIGINT PRIMARY KEY,
     signal_id           TEXT,
     correlation_id      TEXT,
@@ -24,10 +24,10 @@ CREATE TABLE IF NOT EXISTS production.trades (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_production_trades_entry ON production.trades (entry_time);
-CREATE INDEX IF NOT EXISTS idx_production_trades_symbol ON production.trades (symbol);
+CREATE INDEX IF NOT EXISTS idx_testing_trades_entry ON testing.trades (entry_time);
+CREATE INDEX IF NOT EXISTS idx_testing_trades_symbol ON testing.trades (symbol);
 
-CREATE TABLE IF NOT EXISTS production.history_trades (
+CREATE TABLE IF NOT EXISTS testing.history_trades (
     ticket_id           BIGINT PRIMARY KEY,
     signal_id           TEXT,
     correlation_id      TEXT,
@@ -56,11 +56,11 @@ CREATE TABLE IF NOT EXISTS production.history_trades (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_production_history_exit ON production.history_trades (exit_time);
-CREATE INDEX IF NOT EXISTS idx_production_history_entry ON production.history_trades (entry_time);
-CREATE INDEX IF NOT EXISTS idx_production_history_symbol ON production.history_trades (symbol);
+CREATE INDEX IF NOT EXISTS idx_testing_history_exit ON testing.history_trades (exit_time);
+CREATE INDEX IF NOT EXISTS idx_testing_history_entry ON testing.history_trades (entry_time);
+CREATE INDEX IF NOT EXISTS idx_testing_history_symbol ON testing.history_trades (symbol);
 
-CREATE TABLE IF NOT EXISTS production.candles (
+CREATE TABLE IF NOT EXISTS testing.candles (
     symbol              TEXT NOT NULL,
     timeframe           TEXT NOT NULL,
     timestamp           TIMESTAMPTZ NOT NULL,
@@ -77,5 +77,5 @@ CREATE TABLE IF NOT EXISTS production.candles (
     PRIMARY KEY (symbol, timeframe, timestamp)
 );
 
-CREATE INDEX IF NOT EXISTS idx_production_candles_ts ON production.candles (timestamp);
-CREATE INDEX IF NOT EXISTS idx_production_candles_symbol_tf ON production.candles (symbol, timeframe);
+CREATE INDEX IF NOT EXISTS idx_testing_candles_ts ON testing.candles (timestamp);
+CREATE INDEX IF NOT EXISTS idx_testing_candles_symbol_tf ON testing.candles (symbol, timeframe);

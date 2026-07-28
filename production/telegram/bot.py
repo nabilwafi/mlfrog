@@ -216,7 +216,15 @@ def _fmt_price(v: Any) -> str:
 
 
 def _fmt_trade_id(p: dict[str, Any]) -> str:
-    """Compact display id from trade_id / signal_id hex."""
+    """Display #ticket_id (paper synthetic or MT5 position ticket)."""
+    ticket = p.get("ticket_id")
+    if ticket is None:
+        ticket = p.get("broker_ticket")
+    if ticket is not None:
+        try:
+            return f"#{int(ticket)}"
+        except (TypeError, ValueError):
+            return f"#{ticket}"
     raw = str(p.get("trade_id") or p.get("signal_id") or "").replace("-", "").strip()
     if not raw:
         return "n/a"
