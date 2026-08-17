@@ -260,16 +260,45 @@ class LiveBroker:
         import MetaTrader5 as mt5
 
         now = datetime.now(timezone.utc)
-        start = (now - timedelta(days=7)).replace(tzinfo=None)
-        end = now.replace(tzinfo=None)
-        deals = mt5.history_deals_get(start, end) or ()
+        # ponytail: MT5 treats naive datetimes as terminal/server time, not UTC.
+        # A UTC `end` can sit hours behind the SL deal → empty history, silent miss.
+        # Pad both sides; ceiling is +2d clock skew. Upgrade: use TimeCurrent() if needed.
+        start = (now - timedelta(days=14)).replace(tzinfo=None)
+        end = (now + timedelta(days=2)).replace(tzinfo=None)
+        deals = mt5.history_deals_get(start, end)
+        if deals is None:
+            logger.warning(
+                "history_deals_get failed err=%s start=%s end=%s",
+                mt5.last_error(),
+                start,
+                end,
+            )
+            deals = ()
+        out_codes = {int(mt5.DEAL_ENTRY_OUT), int(getattr(mt5, "DEAL_ENTRY_OUT_BY", 3))}
         out: dict[str, dict[str, Any]] = {}
         for trade_id, ticket in tickets.items():
             if mt5.positions_get(ticket=ticket):
                 continue
             pos_deals = [d for d in deals if int(getattr(d, "position_id", 0) or 0) == int(ticket)]
-            close_deals = [d for d in pos_deals if int(getattr(d, "entry", -1)) == mt5.DEAL_ENTRY_OUT]
+            if not pos_deals:
+                by_pos = mt5.history_deals_get(position=int(ticket))
+                pos_deals = list(by_pos or ())
+            close_deals = [d for d in pos_deals if int(getattr(d, "entry", -1)) in out_codes]
             if not close_deals:
+                logger.warning(
+                    "broker_position_gone_no_deal trade_id=%s ticket=%s n_deals=%d",
+                    trade_id,
+                    ticket,
+                    len(pos_deals),
+                )
+                out[trade_id] = {
+                    "exit_price": 0.0,
+                    "pnl": 0.0,
+                    "exit_reason": "SL",
+                    "exit_time": now,
+                    "broker_response": "BROKER_NO_DEAL",
+                }
+                self._tickets.pop(trade_id, None)
                 continue
             d = close_deals[-1]
             pnl = float(getattr(d, "profit", 0) or 0)

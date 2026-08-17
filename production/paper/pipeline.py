@@ -427,12 +427,18 @@ class ProductionPipeline:
             exit_time = info.get("exit_time") or timestamp
             if exit_time.tzinfo is None:
                 exit_time = exit_time.replace(tzinfo=timezone.utc)
+            exit_px = float(info.get("exit_price") or 0)
+            if exit_px <= 0:
+                exit_px = float(pos.stop_loss)
+            pnl = float(info.get("pnl") or 0)
+            if str(info.get("broker_response") or "") == "BROKER_NO_DEAL":
+                pnl = PaperBroker.pnl(pos.side, pos.entry_price, exit_px, pos.lot)
             closed.append(
                 self._finalize_close(
                     tid,
                     pos,
-                    exit_px=float(info["exit_price"]),
-                    pnl=float(info["pnl"]),
+                    exit_px=exit_px,
+                    pnl=pnl,
                     reason=str(info.get("exit_reason") or "BROKER"),
                     timestamp=exit_time,
                     broker_response=str(info.get("broker_response") or "BROKER"),
@@ -563,8 +569,11 @@ class ProductionPipeline:
                 continue
             fill = self.broker.close_order(tid, exit_px)
             if not fill.success and fill.broker_response == "NOT_FOUND":
-                # broker already closed — reconcile on next poll will emit TRADE_CLOSED
-                continue
+                extra = self.reconcile_broker_positions(timestamp=timestamp)
+                closed.extend(extra)
+                if tid not in self.state.open_positions:
+                    continue
+                logger.warning("broker_gone_finalize_local trade_id=%s reason=%s", tid, reason)
             exit_px = float(fill.fill_price) if fill.success else float(exit_px)
             pnl = PaperBroker.pnl(pos.side, pos.entry_price, exit_px, pos.lot)
             closed.append(
@@ -602,6 +611,22 @@ class ProductionPipeline:
             return 0
         rows = enrich_with_db(rows, db, symbol=sym)
         return recover_positions_into_state(self.state, self.broker, rows, symbol=sym)
+
+    def close_stale_db_opens(self, db: Any | None = None, *, symbol: str | None = None) -> int:
+        """Close DB open-book trades that already died on MT5 while this process was down."""
+        from production.live.positions import recover_positions_into_state, stale_db_opens
+
+        if db is None or not getattr(db, "enabled", False):
+            return 0
+        sym = str(symbol or self.symbol)
+        live = {int(p.broker_ticket) for p in self.state.open_positions.values() if p.broker_ticket}
+        stale = stale_db_opens(db, symbol=sym, live_tickets=live)
+        if not stale:
+            return 0
+        recover_positions_into_state(self.state, self.broker, stale, symbol=sym)
+        closed = self.reconcile_broker_positions(timestamp=datetime.now(timezone.utc))
+        logger.info("stale_db_closes symbol=%s n=%s", sym, len(closed))
+        return len(closed)
 
     def emit_daily_summary(
         self,

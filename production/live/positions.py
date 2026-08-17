@@ -163,6 +163,50 @@ def enrich_with_db(rows: list[BrokerOpenPosition], db: Any, *, symbol: str) -> l
     return out
 
 
+def broker_open_from_db_row(row: dict[str, Any]) -> BrokerOpenPosition:
+    ticket = int(row["ticket_id"])
+    entry_time = row.get("entry_time") or datetime.now(timezone.utc)
+    if isinstance(entry_time, datetime) and entry_time.tzinfo is None:
+        entry_time = entry_time.replace(tzinfo=timezone.utc)
+    return BrokerOpenPosition(
+        trade_id=str(row.get("trade_id") or row.get("signal_id") or f"recovered-{ticket}"),
+        broker_ticket=ticket,
+        side=str(row["side"]),
+        entry_time=entry_time,
+        entry_price=float(row["entry_price"]),
+        stop_loss=float(row["stop_loss"]),
+        take_profit=float(row.get("take_profit") or 0),
+        lot=float(row["lot"]),
+        comment="",
+        signal_id=str(row.get("signal_id") or ticket),
+        correlation_id=str(row.get("correlation_id") or "") or None,
+        risk_pct=float(row["risk_pct"]) if row.get("risk_pct") is not None else None,
+        session=row.get("session"),
+        regime=row.get("regime"),
+        probability=float(row["probability"]) if row.get("probability") is not None else None,
+        meta_probability=float(row["meta_probability"]) if row.get("meta_probability") is not None else None,
+        confidence=float(row["confidence"]) if row.get("confidence") is not None else None,
+        from_db=True,
+    )
+
+
+def stale_db_opens(db: Any, *, symbol: str, live_tickets: set[int]) -> list[BrokerOpenPosition]:
+    """DB open-book rows whose MT5 position is already gone (closed while bot was down)."""
+    if db is None or not getattr(db, "enabled", False):
+        return []
+    fetch = getattr(db, "fetch_open_trades_by_ticket", None)
+    if not callable(fetch):
+        return []
+    by_ticket = fetch(symbol=symbol) or {}
+    live = {int(t) for t in live_tickets}
+    out: list[BrokerOpenPosition] = []
+    for ticket, row in by_ticket.items():
+        if int(ticket) in live:
+            continue
+        out.append(broker_open_from_db_row(row))
+    return out
+
+
 def recover_positions_into_state(
     state: Any,
     broker: Any,

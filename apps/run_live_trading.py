@@ -130,6 +130,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"recovered {n_rec} open MT5 position(s) — trail/reconcile active")
         else:
             log.info("recover_none — no open positions with bot magic on %s", trade_symbol)
+        n_stale = pipeline.close_stale_db_opens(db=db, symbol=trade_symbol)
+        if n_stale:
+            print(f"closed {n_stale} trade(s) that ended while bot was down")
 
         runtime = PaperRuntime(
             pipeline=pipeline,

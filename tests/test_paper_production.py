@@ -10,7 +10,7 @@ import pandas as pd
 
 from production.events.bus import EventBus, MetricsCollector
 from production.events.types import EventType, make_event
-from production.paper.broker import PaperBroker
+from production.paper.broker import FillResult, PaperBroker
 from production.paper.pipeline import IncomingSignal, ProductionPipeline
 from production.paper.state import PortfolioState
 from production.monitoring.health import HealthReporter
@@ -136,6 +136,93 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(len(closed) >= 1)
         self.assertNotIn(tid, state.open_positions)
         time.sleep(0.15)
+        bus.stop()
+
+    def test_broker_sl_not_found_still_closes(self) -> None:
+        """MT5 already hit SL → close_order NOT_FOUND must still emit TRADE_CLOSED."""
+
+        class GoneBroker(PaperBroker):
+            def close_order(self, trade_id, exit_price):
+                return FillResult(
+                    success=False,
+                    trade_id=str(trade_id),
+                    fill_price=0.0,
+                    spread=0.0,
+                    slippage=0.0,
+                    latency_ms=0.0,
+                    retry_count=0,
+                    broker_response="NOT_FOUND",
+                    error_message="position gone",
+                )
+
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=GoneBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="sl_gone",
+            )
+        )
+        self.assertEqual(out["status"], "opened")
+        tid = out["trade_id"]
+        # atr=4, SL=1994
+        closed = pipe.on_bar(
+            high=2001, low=1990, close=1993, timestamp=datetime(2024, 1, 2, 12, tzinfo=timezone.utc)
+        )
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["exit_reason"], "SL")
+        self.assertNotIn(tid, state.open_positions)
+        bus.stop()
+
+    def test_reconcile_no_deal_uses_sl(self) -> None:
+        class StubBroker:
+            def reconcile_closed(self, tickets):
+                tid = next(iter(tickets))
+                return {
+                    tid: {
+                        "exit_price": 0.0,
+                        "pnl": 0.0,
+                        "exit_reason": "SL",
+                        "exit_time": datetime(2024, 1, 2, 11, tzinfo=timezone.utc),
+                        "broker_response": "BROKER_NO_DEAL",
+                    }
+                }
+
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        out = pipe.process_signal(
+            IncomingSignal(
+                timestamp=datetime(2024, 1, 2, 10, tzinfo=timezone.utc),
+                symbol="XAUUSD",
+                side="long",
+                probability=0.6,
+                meta_probability=0.55,
+                confidence=55,
+                entry_price=2000,
+                atr=4.0,
+                bar_key="sl_stub",
+            )
+        )
+        tid = out["trade_id"]
+        pos = state.open_positions[tid]
+        sl = float(pos.stop_loss)
+        pipe.broker = StubBroker()
+        closed = pipe.reconcile_broker_positions(timestamp=datetime(2024, 1, 2, 11, tzinfo=timezone.utc))
+        self.assertEqual(len(closed), 1)
+        self.assertAlmostEqual(closed[0]["exit_price"], sl)
+        self.assertEqual(closed[0]["exit_reason"], "SL")
+        self.assertNotIn(tid, state.open_positions)
         bus.stop()
 
     def test_duplicate_idempotent(self) -> None:
@@ -938,6 +1025,71 @@ class LiveSourceTests(unittest.TestCase):
         self.assertTrue(enriched[0].from_db)
         self.assertEqual(enriched[0].session, "london")
         self.assertEqual(enriched[0].broker_ticket, 77)
+
+    def test_stale_db_opens_skips_live(self) -> None:
+        from production.live.positions import stale_db_opens
+
+        class FakeDb:
+            enabled = True
+
+            def fetch_open_trades_by_ticket(self, *, symbol=None, tickets=None):
+                base = {
+                    "entry_time": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                    "entry_price": 2650.0,
+                    "stop_loss": 2640.0,
+                    "take_profit": 0.0,
+                    "lot": 0.01,
+                    "side": "long",
+                }
+                return {
+                    10: {**base, "ticket_id": 10},
+                    11: {**base, "ticket_id": 11, "side": "short", "stop_loss": 2660.0},
+                }
+
+        stale = stale_db_opens(FakeDb(), symbol="XAUUSDc", live_tickets={10})
+        self.assertEqual([r.broker_ticket for r in stale], [11])
+
+    def test_close_stale_db_opens_emits_close(self) -> None:
+        class FakeDb:
+            enabled = True
+
+            def fetch_open_trades_by_ticket(self, *, symbol=None, tickets=None):
+                return {
+                    88: {
+                        "ticket_id": 88,
+                        "side": "long",
+                        "entry_time": datetime(2026, 8, 17, 10, tzinfo=timezone.utc),
+                        "entry_price": 2650.0,
+                        "stop_loss": 2640.0,
+                        "take_profit": 0.0,
+                        "lot": 0.01,
+                    }
+                }
+
+        class FakeBroker:
+            def register_recovered(self, trade_id, ticket):
+                return None
+
+            def reconcile_closed(self, tickets):
+                tid = next(iter(tickets))
+                return {
+                    tid: {
+                        "exit_price": 2640.0,
+                        "pnl": -10.0,
+                        "exit_reason": "SL",
+                        "exit_time": datetime(2026, 8, 17, 12, tzinfo=timezone.utc),
+                        "broker_response": "BROKER",
+                    }
+                }
+
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=500.0, peak_equity=500.0)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=FakeBroker(), symbol="XAUUSDc")
+        n = pipe.close_stale_db_opens(db=FakeDb(), symbol="XAUUSDc")
+        self.assertEqual(n, 1)
+        self.assertNotIn("88", state.open_positions)
+        bus.stop()
 
 
 class CandleEventTests(unittest.TestCase):
