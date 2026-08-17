@@ -61,6 +61,10 @@ class PaperRuntime:
                     tick = self.source.poll()
                     now = datetime.now(timezone.utc)
                     self.pipeline.reconcile_broker_positions(timestamp=now)
+                    manage = getattr(tick, "manage_bar", None) or tick.bar
+                    if manage is not None:
+                        ts_m = manage.timestamp if manage.timestamp.tzinfo else manage.timestamp.replace(tzinfo=timezone.utc)
+                        self.pipeline.on_bar(high=manage.high, low=manage.low, close=manage.close, timestamp=ts_m)
                     if tick.bar is not None:
                         b = tick.bar
                         ts = b.timestamp if b.timestamp.tzinfo else b.timestamp.replace(tzinfo=timezone.utc)
@@ -84,7 +88,6 @@ class PaperRuntime:
                                 },
                             )
                         )
-                        self.pipeline.on_bar(high=b.high, low=b.low, close=b.close, timestamp=ts)
                     for sig in tick.signals:
                         self.pipeline.process_signal(sig)
                 else:

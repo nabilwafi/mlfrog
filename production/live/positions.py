@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
-from production import EXIT_MODE, RISK_PCT, TRAIL_ACTIVATE_R, TRAIL_ATR_MULT
+from production import EXIT_MODE, RISK_PCT, TRAIL_ACTIVATE_R, TRAIL_ATR_MULT, TRAIL_TIMEFRAME
 from production.paper.state import OpenPosition
 from settings.strategy import SL_ATR_MULT
 
@@ -249,6 +249,7 @@ def recover_positions_into_state(
                 "exit_mode": EXIT_MODE,
                 "trail_atr_mult": TRAIL_ATR_MULT,
                 "trail_activate_r": TRAIL_ACTIVATE_R,
+                "trail_timeframe": TRAIL_TIMEFRAME,
                 "session": r.session,
                 "regime": r.regime,
                 "probability": r.probability,

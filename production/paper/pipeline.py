@@ -13,7 +13,6 @@ from production import (
     BLOCK_OPPOSITE_SIDE,
     CONFIDENCE_ENABLED,
     CONFIDENCE_SKIP,
-    EXIT_HORIZON_BARS,
     EXIT_MODE,
     FEATURE_VERSION,
     FIXED_LOT,
@@ -32,7 +31,9 @@ from production import (
     TAKE_PROFIT_ENABLED,
     TRAIL_ACTIVATE_R,
     TRAIL_ATR_MULT,
+    TRAIL_TIMEFRAME,
     atr_risk_mult,
+    trail_horizon_bars,
 )
 from production.events.bus import EventBus
 from production.events.types import EventType, make_event
@@ -319,6 +320,7 @@ class ProductionPipeline:
                 "exit_mode": EXIT_MODE,
                 "trail_atr_mult": TRAIL_ATR_MULT,
                 "trail_activate_r": TRAIL_ACTIVATE_R,
+                "trail_timeframe": TRAIL_TIMEFRAME,
                 "atr_percentile": float(sig.atr_percentile),
                 "risk_mult": risk_scale,
                 "heat_slots": add_heat,
@@ -362,6 +364,7 @@ class ProductionPipeline:
                     "exit_mode": EXIT_MODE,
                     "trail_atr_mult": TRAIL_ATR_MULT,
                     "trail_activate_r": TRAIL_ACTIVATE_R,
+                    "trail_timeframe": TRAIL_TIMEFRAME,
                     "environment": self.environment,
                     "ticket_id": ticket,
                     "broker_ticket": ticket,
@@ -535,6 +538,7 @@ class ProductionPipeline:
                             "unrealized_pnl": u_pnl,
                             "trail_atr_mult": pos.meta.get("trail_atr_mult", TRAIL_ATR_MULT),
                             "trail_activate_r": pos.meta.get("trail_activate_r", TRAIL_ACTIVATE_R),
+                            "trail_timeframe": pos.meta.get("trail_timeframe", TRAIL_TIMEFRAME),
                             "session": pos.meta.get("session"),
                             "regime": pos.meta.get("regime"),
                             "trend": pos.meta.get("trend"),
@@ -563,7 +567,7 @@ class ProductionPipeline:
                 exit_px = pos.stop_loss
             elif hit_tp:
                 reason, exit_px = "TP", pos.take_profit
-            elif pos.bars_held >= int(EXIT_HORIZON_BARS):
+            elif pos.bars_held >= trail_horizon_bars():
                 reason, exit_px = "TIMEOUT", close
             if reason is None:
                 continue

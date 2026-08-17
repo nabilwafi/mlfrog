@@ -856,6 +856,50 @@ class LiveSourceTests(unittest.TestCase):
         self.assertAlmostEqual(t1.signals[0].atr, 2302.0 * 0.2 / 100.0, places=6)
         self.assertEqual(len(t2.signals), 0)
 
+    def test_trail_horizon_m15_is_192(self) -> None:
+        from production import TRAIL_TIMEFRAME, trail_horizon_bars
+
+        self.assertEqual(TRAIL_TIMEFRAME, "M15")
+        self.assertEqual(trail_horizon_bars(), 192)
+
+    def test_poll_emits_m15_manage_bar_without_new_h1(self) -> None:
+        from production.live.signal_source import LiveMT5SignalSource
+
+        h1_ts = pd.Timestamp("2024-06-01 10:00:00", tz="UTC")
+        m15_ts = pd.Timestamp("2024-06-01 10:15:00", tz="UTC")
+
+        def _bar(ts):
+            return pd.DataFrame(
+                [{
+                    "timestamp": ts, "open": 2300.0, "high": 2305.0, "low": 2298.0,
+                    "close": 2302.0, "tick_volume": 100, "spread": 2, "real_volume": 0,
+                }]
+            )
+
+        class FakeFeed:
+            def latest_closed_bar(self, timeframe: str):
+                return _bar(m15_ts) if str(timeframe).upper() == "M15" else _bar(h1_ts)
+
+            def fetch(self, timeframe: str, *, count: int):
+                return _bar(h1_ts)
+
+        src = LiveMT5SignalSource({"timezone": "UTC"}, symbol="XAUUSD")
+        src._feed = FakeFeed()  # type: ignore[assignment]
+        src._last_bar_ts = h1_ts
+        import production.live.signal_source as ss
+
+        real = ss.is_stale_closed_bar
+        ss.is_stale_closed_bar = lambda *a, **k: False  # type: ignore[assignment]
+        try:
+            tick = src.poll()
+        finally:
+            ss.is_stale_closed_bar = real  # type: ignore[assignment]
+        self.assertIsNone(tick.bar)
+        self.assertEqual(tick.signals, [])
+        self.assertIsNotNone(tick.manage_bar)
+        self.assertEqual(tick.manage_bar.timeframe, "M15")
+        self.assertEqual(pd.Timestamp(tick.manage_bar.timestamp), m15_ts)
+
     def test_stale_bar_seeds_cursor_waits_for_reopen(self) -> None:
         from production.live.mt5_candles import is_stale_closed_bar
         from production.live.signal_source import LiveMT5SignalSource

@@ -1,6 +1,6 @@
 """Production paper/live policy knobs (research-locked stack).
 
-Locked: FEAT7 primary + top 21% + ATR trail a0.25/d0.08
+Locked: FEAT7 primary + top 21% + ATR trail a0.25/d0.08 on M15 close
 + fixed lot 0.01 (no ATR scale)
 + Parallel multi-trade max_open=5, dist=0 ATR, cooldown=0, heat_budget=3R
 + daily 1R only while equity <= $80 (else daily OFF).
@@ -60,10 +60,19 @@ ATR_RISK_MULTS: tuple[float, ...] = (1.0, 0.70, 0.40, 0.25, 0.10)
 EXIT_MODE: str = "atr_trail"  # atr_trail | barrier
 TRAIL_ATR_MULT: float = 0.08
 TRAIL_ACTIVATE_R: float = 0.25  # activate after +0.25R (R = SL_ATR * atr)
+# Entry stays H1. Trail ratchet + SL mark use this closed-bar clock.
+TRAIL_TIMEFRAME: str = "M15"
 TAKE_PROFIT_ENABLED: bool = False
-EXIT_HORIZON_BARS: int = 48  # research CAP when time exit disabled
+EXIT_HORIZON_BARS: int = 48  # research CAP in H1 bars; scaled to TRAIL_TIMEFRAME
 TRAIL_HORIZON: int = 48  # alias used by older call sites
 SL_ATR_MULT: float = 1.5
+_TF_SECONDS = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
+
+
+def trail_horizon_bars() -> int:
+    """48 H1 bars → equivalent closed bars on TRAIL_TIMEFRAME (M15 → 192)."""
+    tf = _TF_SECONDS.get(str(TRAIL_TIMEFRAME).upper(), 3600)
+    return max(1, int(round(int(EXIT_HORIZON_BARS) * 3600 / tf)))
 
 # --- Account sync (MT5 account_info) ---
 USE_ACCOUNT_EQUITY: bool = True
@@ -82,7 +91,7 @@ MODEL_VERSION: str = "primary_feat7_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
 FEATURE_VERSION: str = "fs7_feat"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v4_feat7_top21_a025_d008_lot01_daily80"
+PIPELINE_VERSION: str = "prod_v5_feat7_top21_a025_d008_lot01_daily80_m15trail"
 
 
 def atr_risk_mult(atr_percentile: float) -> float:

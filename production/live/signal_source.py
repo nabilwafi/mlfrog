@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from production import TRAIL_TIMEFRAME
 from production.live.features import LiveFeatureBuilder
 from production.live.inference import FrozenStackInference, ScoredSignal
 from production.live.mt5_candles import MT5CandleFeed, is_stale_closed_bar
@@ -35,10 +36,11 @@ class ClosedBar:
 
 @dataclass
 class LiveTick:
-    """One poll: optional newly closed bar + signals to process."""
+    """One poll: optional newly closed H1 (entry) + M15 manage bar + signals."""
 
     bar: ClosedBar | None
     signals: list[IncomingSignal]
+    manage_bar: ClosedBar | None = None
 
 
 class LiveMT5SignalSource:
@@ -66,7 +68,9 @@ class LiveMT5SignalSource:
         self._features = LiveFeatureBuilder(cfg, symbol=self._symbol, timezone=str(cfg.get("timezone", "UTC")))
         self._inference = FrozenStackInference(cfg, symbol=ms, timeframe=timeframe)
         self._last_bar_ts: pd.Timestamp | None = None
+        self._last_trail_ts: pd.Timestamp | None = None
         self._market_was_closed: bool = False
+        self._trail_tf = str(TRAIL_TIMEFRAME).upper()
 
     def connect(self) -> None:
         self._feed.connect()
@@ -74,14 +78,53 @@ class LiveMT5SignalSource:
     def disconnect(self) -> None:
         self._feed.disconnect()
 
+    def _closed_bar(self, row: pd.Series, ts: pd.Timestamp, timeframe: str) -> ClosedBar:
+        return ClosedBar(
+            symbol=self._symbol,
+            timeframe=timeframe,
+            timestamp=ts.to_pydatetime(),
+            open=float(row["open"]),
+            high=float(row["high"]),
+            low=float(row["low"]),
+            close=float(row["close"]),
+            tick_volume=float(row.get("tick_volume") or 0),
+            spread=float(row.get("spread") or 0),
+            real_volume=float(row.get("real_volume") or 0),
+        )
+
+    def _poll_manage_bar(self) -> ClosedBar | None:
+        """New closed trail-clock bar. No inference. None if trail tf is the entry tf."""
+        if self._trail_tf == self._timeframe:
+            return None
+        try:
+            closed = self._feed.latest_closed_bar(self._trail_tf)
+        except Exception:
+            logger.exception("live_trail_poll_failed tf=%s", self._trail_tf)
+            return None
+        if closed is None or closed.empty:
+            return None
+        row = closed.iloc[0]
+        ts = pd.Timestamp(row["timestamp"])
+        ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+        if self._last_trail_ts is not None and ts <= self._last_trail_ts:
+            return None
+        if is_stale_closed_bar(ts, self._trail_tf):
+            if self._last_trail_ts is None or ts > self._last_trail_ts:
+                self._last_trail_ts = ts
+            return None
+        self._last_trail_ts = ts
+        logger.info("live_trail_bar_closed tf=%s ts=%s close=%s", self._trail_tf, ts.isoformat(), row["close"])
+        return self._closed_bar(row, ts, self._trail_tf)
+
     def poll(self) -> LiveTick:
+        manage_bar = self._poll_manage_bar()
         try:
             closed = self._feed.latest_closed_bar(self._timeframe)
         except Exception:
             logger.exception("live_poll_failed")
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
         if closed is None or closed.empty:
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
         row = closed.iloc[0]
         ts = pd.Timestamp(row["timestamp"])
         if ts.tzinfo is None:
@@ -89,7 +132,7 @@ class LiveMT5SignalSource:
         else:
             ts = ts.tz_convert("UTC")
         if self._last_bar_ts is not None and ts <= self._last_bar_ts:
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
 
         # Weekend / holiday: last MT5 bar is fully closed but stale — seed cursor only.
         # Without this, bot "eats" Friday as a live bar then looks stuck until next close.
@@ -101,7 +144,7 @@ class LiveMT5SignalSource:
                     "live_market_closed_seed_cursor ts=%s — waiting for first bar after reopen",
                     ts.isoformat(),
                 )
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
 
         if self._market_was_closed:
             logger.info("live_market_reopened first_bar_ts=%s", ts.isoformat())
@@ -114,15 +157,15 @@ class LiveMT5SignalSource:
             m5 = self._feed.fetch("M5", count=min(2000, self._history * 12))
             if h1.empty:
                 logger.warning("live_h1_empty ts=%s — MT5 history missing?", ts)
-                return LiveTick(bar=None, signals=[])
+                return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
             panel = self._features.build_panel(h1=h1, h4=h4, d1=d1, m5=m5)
         except Exception:
             logger.exception("live_feature_build_failed ts=%s", ts)
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
 
         if panel.empty:
             logger.warning("live_feature_panel_empty ts=%s", ts)
-            return LiveTick(bar=None, signals=[])
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
 
         # only advance cursor after we can actually emit a bar
         self._last_bar_ts = ts
@@ -169,26 +212,15 @@ class LiveMT5SignalSource:
                 )
             ]
 
-        bar = ClosedBar(
-            symbol=self._symbol,
-            timeframe=self._timeframe,
-            timestamp=ts.to_pydatetime(),
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            tick_volume=float(row.get("tick_volume") or 0),
-            spread=float(row.get("spread") or 0),
-            real_volume=float(row.get("real_volume") or 0),
-            features=_features_snapshot(feat_row),
-        )
+        bar = self._closed_bar(row, ts, self._timeframe)
+        bar.features = _features_snapshot(feat_row)
         logger.info(
             "live_bar_closed ts=%s close=%s signals=%s",
             ts.isoformat(),
             row["close"],
             len(signals),
         )
-        return LiveTick(bar=bar, signals=signals)
+        return LiveTick(bar=bar, signals=signals, manage_bar=manage_bar)
 
 
 def _to_incoming(scored: ScoredSignal, *, symbol: str) -> IncomingSignal:

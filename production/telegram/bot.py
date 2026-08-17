@@ -475,7 +475,9 @@ def _trail_policy_line(p: dict[str, Any]) -> str:
         return "🔄 Exit  : ATR Trail"
     if act is None:
         return f"🔄 Exit  : ATR Trail {mult:.2f}"
-    return f"🔄 Exit  : ATR Trail {mult:.2f} (after +{act:g}R)"
+    tf = str(p.get("trail_timeframe") or "").upper()
+    clock = f" {tf}" if tf else ""
+    return f"🔄 Exit  : ATR Trail {mult:.2f}{clock} (after +{act:g}R)"
 
 
 def fmt_new_trade(p: dict[str, Any]) -> str:

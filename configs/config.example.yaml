@@ -499,7 +499,7 @@ paper_trading:
   live:
     timeframe: H1
     history_bars: 400
-    poll_seconds: 30            # how often to check for new closed H1 bar
+    poll_seconds: 30            # new closed H1 (entry) and M15 (trail)
   frozen_models_dir: ./artifacts/models/frozen
   # postgres_dsn: "postgresql://user:pass@localhost:5432/xauusd"
   postgres_dsn: "postgresql://trading:trading@localhost:5432/trading"
