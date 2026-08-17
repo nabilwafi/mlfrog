@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any
 
-from production import DAILY_LOSS_STOP_R, RISK_BASE
+from production import DAILY_LOSS_STOP_R, DAILY_ON_EQUITY_MAX, RISK_BASE
 
 
 @dataclass
@@ -84,6 +84,8 @@ class PortfolioState:
         return self.equity * RISK_BASE
 
     def daily_heat_blocked(self) -> bool:
+        if DAILY_ON_EQUITY_MAX is not None and self.equity > float(DAILY_ON_EQUITY_MAX):
+            return False
         ru = self.r_unit()
         if ru <= 0:
             return True

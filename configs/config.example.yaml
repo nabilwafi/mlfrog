@@ -515,6 +515,10 @@ paper_trading:
     error_thread_id: 5                   # execution error topic (reuses chat_id)
     # only set health_chat_id / daily_chat_id / error_chat_id if those go to a different group
 
+# Live/paper policy (sprint38 1000-trade stack). Code defaults in production/__init__.py.
+production:
+  primary_top_pct: 0.21
+
 # Live trading — production schema (sql/production_schema.sql); real order_send with --execute
 live_trading:
   # inherits telegram/dsn from paper_trading if omitted

@@ -81,15 +81,131 @@ def _atr_mult(atr_pct: np.ndarray) -> np.ndarray:
 
 
 def _cache_panel() -> pd.DataFrame:
-    path = OUT / "entry_panel.parquet"
+    # always reuse the frozen FEAT7 entry panel from the original sprint37 folder
+    cache_dir = _ROOT / "artifacts" / "pipeline_backtest" / "rolling_wf" / "sprint37_multi_trade"
+    path = cache_dir / "entry_panel.parquet"
     if path.is_file():
         print(f"  load cached entries {path}")
         return pd.read_parquet(path)
     print("  building FEAT7 WF entries (frozen)…")
     panel = build_entry_panel()
-    OUT.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     panel.to_parquet(path, index=False)
     return panel
+
+
+def no_heat_engines() -> list[EngineCfg]:
+    """Parallel multi-trade without heat_budget_r / daily-loss gates (for ablation)."""
+    # heat_budget unused when no_heat=True; keep high for metrics column
+    INF = 1e9
+    out: list[EngineCfg] = [
+        EngineCfg(name="baseline_single_atr", family="baseline", max_positions=1, heat_budget_r=1.0),
+        # prior winner WITH heat — comparison anchor
+        EngineCfg(
+            name="parallel_mo5_d0.0_cd0_h3.0",
+            family="parallel",
+            max_positions=5,
+            min_distance_atr=0.0,
+            cooldown_bars=0,
+            heat_budget_r=3.0,
+        ),
+    ]
+    for mo, dist, cd in itertools.product((2, 3, 5), (0.0, 0.5, 1.0), (0, 1, 2)):
+        out.append(
+            EngineCfg(
+                name=f"parallel_mo{mo}_d{dist}_cd{cd}_noheat",
+                family="parallel",
+                max_positions=mo,
+                min_distance_atr=dist,
+                cooldown_bars=cd,
+                heat_budget_r=INF,
+            )
+        )
+    return out
+
+
+def no_daily_loss_engines() -> list[EngineCfg]:
+    """Parallel multi-trade: heat_budget kept, daily loss stop OFF."""
+    out: list[EngineCfg] = [
+        EngineCfg(name="baseline_single_atr", family="baseline", max_positions=1, heat_budget_r=1.0),
+        # control WITH daily loss + heat 3R
+        EngineCfg(
+            name="parallel_mo5_d0.0_cd0_h3.0",
+            family="parallel",
+            max_positions=5,
+            min_distance_atr=0.0,
+            cooldown_bars=0,
+            heat_budget_r=3.0,
+        ),
+    ]
+    for mo, dist, cd in itertools.product((2, 3, 5), (0.0, 0.5, 1.0), (0, 1, 2)):
+        out.append(
+            EngineCfg(
+                name=f"parallel_mo{mo}_d{dist}_cd{cd}_h3_nodaily",
+                family="parallel",
+                max_positions=mo,
+                min_distance_atr=dist,
+                cooldown_bars=cd,
+                heat_budget_r=3.0,
+            )
+        )
+    return out
+
+
+def broker_lot_engines() -> list[EngineCfg]:
+    """Winner family with MT5 volume_min/step=0.01 (fractional ATR lots skipped)."""
+    out: list[EngineCfg] = [
+        EngineCfg(name="baseline_single_atr", family="baseline", max_positions=1, heat_budget_r=1.0),
+        # research control — fractional lots allowed (no broker grid)
+        EngineCfg(
+            name="parallel_mo5_d0.0_cd0_h3.0",
+            family="parallel",
+            max_positions=5,
+            min_distance_atr=0.0,
+            cooldown_bars=0,
+            heat_budget_r=3.0,
+        ),
+    ]
+    for mo, heat in itertools.product((2, 3, 5), (1.0, 2.0, 3.0)):
+        out.append(
+            EngineCfg(
+                name=f"parallel_mo{mo}_d0.0_cd0_h{heat}_brokerlot",
+                family="parallel",
+                max_positions=mo,
+                min_distance_atr=0.0,
+                cooldown_bars=0,
+                heat_budget_r=heat,
+            )
+        )
+    return out
+
+
+def lot01_heat_engines() -> list[EngineCfg]:
+    """Always lot=0.01 (no ATR scale); heat + daily loss ON."""
+    out: list[EngineCfg] = [
+        EngineCfg(name="baseline_single_atr", family="baseline", max_positions=1, heat_budget_r=1.0),
+        # research control — ATR-scaled fractional lots
+        EngineCfg(
+            name="parallel_mo5_d0.0_cd0_h3.0",
+            family="parallel",
+            max_positions=5,
+            min_distance_atr=0.0,
+            cooldown_bars=0,
+            heat_budget_r=3.0,
+        ),
+    ]
+    for mo, heat in itertools.product((2, 3, 5), (1.0, 2.0, 3.0)):
+        out.append(
+            EngineCfg(
+                name=f"parallel_mo{mo}_d0.0_cd0_h{heat}_lot01",
+                family="parallel",
+                max_positions=mo,
+                min_distance_atr=0.0,
+                cooldown_bars=0,
+                heat_budget_r=heat,
+            )
+        )
+    return out
 
 
 def candidate_engines() -> list[EngineCfg]:
@@ -213,8 +329,34 @@ def run_multi(
     cfg: EngineCfg,
     *,
     starting: float = STARTING,
+    no_heat: bool = False,
+    no_daily_loss: bool = False,
+    broker_lot: bool = False,
+    volume_min: float = 0.01,
+    volume_step: float = 0.01,
+    fixed_lot_01: bool = False,
+    conf_size: bool = False,
+    conf_hi: float = 0.45,
+    lot_fixed: float | None = None,
+    conf_lot_max: float | None = None,
+    conf_lot_lo: float = 0.0,
+    conf_lot_hi: float = 1.0,
+    daily_stop_r: float | None = None,
+    daily_on_below: float | None = None,
+    daily_on_above: float | None = None,
 ) -> dict[str, Any]:
-    """Multi-pos portfolio; PnL booked at open (parity with run_portfolio_scaled)."""
+    """Multi-pos portfolio; PnL booked at open (parity with run_portfolio_scaled).
+
+    no_heat=True: skip heat_budget_r gate.
+    no_daily_loss=True: skip daily loss stop.
+    broker_lot=True: floor lots to volume_step; clamp up to volume_min (always trade ≥ min).
+    fixed_lot_01=True: ignore ATR lot mult; always FIXED_LOT * frac (heat+daily still apply).
+    conf_size=True: lot=0.02 if y_prob>=conf_hi else 0.01 (floor 0.01).
+    lot_fixed: if set, use that lot (floor 0.01) instead of ATR/conf maps.
+    daily_on_below: if set, daily 1R only while equity is below this (else daily OFF).
+    daily_on_above: if set, daily 1R only while equity is at/above this (else daily OFF).
+    (max_positions / distance / cooldown still apply.)
+    """
     ts_ns = pd.DatetimeIndex(p.ts).as_unit("ns").asi8
     day_arr = ts_ns // 86_400_000_000_000
     hold = sim["holding_bars"]
@@ -238,6 +380,9 @@ def run_multi(
     n_open_obs: list[int] = []
     last_entry_ns = -1
     scale_step = 0
+    lot_skips = 0
+    n_lot_02 = 0
+    lot_sum = 0.0
 
     for i in order:
         t = int(ts_ns[i])
@@ -251,7 +396,14 @@ def run_multi(
             continue
 
         r_unit = equity * RISK_BASE
-        if r_unit <= 0 or day_pnl <= -DAILY_LOSS_STOP_R * r_unit:
+        stop_r = DAILY_LOSS_STOP_R if daily_stop_r is None else float(daily_stop_r)
+        if daily_on_below is not None:
+            daily_armed = equity <= float(daily_on_below)
+        elif daily_on_above is not None:
+            daily_armed = equity >= float(daily_on_above)
+        else:
+            daily_armed = not no_daily_loss
+        if daily_armed and (r_unit <= 0 or day_pnl <= -stop_r * r_unit):
             if equity <= 0:
                 blown = True
             continue
@@ -320,13 +472,41 @@ def run_multi(
             if scale_step >= len(cfg.scale_fracs):
                 continue
             frac = float(cfg.scale_fracs[scale_step])
-        lots = FIXED_LOT * m * frac
+        if lot_fixed is not None:
+            lots = max(float(lot_fixed) * frac, 0.01)
+        elif conf_lot_max is not None:
+            span = max(float(conf_lot_hi) - float(conf_lot_lo), 1e-9)
+            t = (float(probs[i]) - float(conf_lot_lo)) / span
+            t = min(1.0, max(0.0, t))
+            raw = 0.01 + t * (float(conf_lot_max) - 0.01)
+            lots = float(np.floor(raw / 0.01 + 1e-12) * 0.01)
+            lots = max(lots, 0.01)
+            lots = min(lots, float(conf_lot_max)) * frac
+            lots = max(lots, 0.01)
+        elif conf_size:
+            lots = 0.02 if float(probs[i]) >= float(conf_hi) else 0.01
+            lots = max(float(lots) * frac, 0.01)
+        elif fixed_lot_01:
+            lots = FIXED_LOT * frac  # ignore ATR map; always 0.01 (× scale frac)
+        else:
+            lots = FIXED_LOT * m * frac
+        if broker_lot:
+            # MT5 parity: floor to step, then clamp up to volume_min (still trade)
+            step = float(volume_step) if volume_step > 0 else float(volume_min)
+            if lots + 1e-12 < float(volume_min):
+                lot_skips += 1  # counted as "would-be invalid → clamped"
+                lots = float(volume_min)
+            else:
+                lots = float(np.floor(lots / step + 1e-12) * step)
+                if lots + 1e-12 < float(volume_min):
+                    lot_skips += 1
+                    lots = float(volume_min)
         if lots <= 0:
             continue
 
         # heat = sum of ATR-scaled lot slots (lots / FIXED_LOT)
         risk = lots / max(FIXED_LOT, 1e-12)
-        if open_risk + risk > float(cfg.heat_budget_r) + 1e-12:
+        if not no_heat and open_risk + risk > float(cfg.heat_budget_r) + 1e-12:
             continue
 
         margin = required_margin(lots, entry[i], LEVERAGE)
@@ -347,29 +527,31 @@ def run_multi(
             equity = 0.0
             blown = True
         else:
-            pnl = raw_pnl
-            equity += pnl
-        day_pnl += pnl
+            pnl = float(raw_pnl)
+            equity = float(equity + pnl)
 
+        day_pnl += pnl
+        pnls.append(pnl)
+        eq_curve.append(equity)
+        taken.append(int(i))
+        add_types.append(kind)
+        last_entry_ns = t
+        if lots + 1e-12 >= 0.02:
+            n_lot_02 += 1
+        lot_sum += lots
+        if cfg.scale_fracs:
+            scale_step += 1
         opens.append(
             {
                 "idx": int(i),
                 "exit_ns": int(exit_ns_arr[i]),
-                "lots": lots,
-                "margin": margin,
-                "risk": risk,
                 "long": bool(is_long[i]),
+                "lots": lots,
+                "risk": risk,
+                "margin": margin,
                 "prob": float(probs[i]),
-                "kind": kind if is_add else "entry",
             }
         )
-        last_entry_ns = t
-        if cfg.scale_fracs:
-            scale_step += 1
-        taken.append(int(i))
-        pnls.append(float(pnl))
-        eq_curve.append(float(equity))
-        add_types.append(str(opens[-1]["kind"]))
 
     empty = {
         "n_trades": 0,
@@ -395,6 +577,9 @@ def run_multi(
         "avg_scale_in": 0.0,
         "avg_parallel": 0.0,
         "longest_losing_streak": 0,
+        "lot_skips": int(lot_skips),
+        "n_lot_02": 0,
+        "avg_lot": 0.0,
     }
     if not taken:
         return empty
@@ -436,6 +621,9 @@ def run_multi(
         "avg_scale_in": float(np.mean(kinds == "scale_in")),
         "avg_parallel": float(np.mean(np.isin(kinds, ["parallel", "restack", "hybrid", "time_add"]))),
         "longest_losing_streak": int(best),
+        "lot_skips": int(lot_skips),
+        "n_lot_02": int(n_lot_02),
+        "avg_lot": float(lot_sum / len(taken)) if taken else 0.0,
     }
 
 
@@ -491,6 +679,7 @@ def _mc_ruin(base_pnl: np.ndarray, port_pnl: np.ndarray, blown: bool) -> tuple[f
 
 
 def main(argv: list[str] | None = None) -> int:
+    global OUT
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="optional cap on engines for smoke")
     ap.add_argument(
@@ -498,10 +687,65 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="evaluate entire grid (no early-stop on first success-criteria winner)",
     )
+    ap.add_argument(
+        "--no-heat",
+        action="store_true",
+        help="ablation: disable heat_budget_r + daily loss stop; parallel grid only",
+    )
+    ap.add_argument(
+        "--no-daily-loss",
+        action="store_true",
+        help="ablation: keep heat_budget_r, disable daily loss stop only",
+    )
+    ap.add_argument(
+        "--broker-lot",
+        action="store_true",
+        help="ablation: enforce volume_min=volume_step=0.01 (clamp sub-min ATR lots up to 0.01)",
+    )
+    ap.add_argument(
+        "--lot-01",
+        action="store_true",
+        help="ablation: always lot=0.01 (no ATR scale); heat + daily loss ON",
+    )
+    ap.add_argument("--starting", type=float, default=STARTING, help="starting equity USD")
     args = ap.parse_args(argv)
+    starting = float(args.starting)
+    if args.no_heat and (args.no_daily_loss or args.broker_lot or args.lot_01):
+        raise SystemExit("--no-heat cannot combine with other ablation flags")
+    if args.broker_lot and (args.no_daily_loss or args.lot_01):
+        raise SystemExit("--broker-lot cannot combine with --no-daily-loss / --lot-01")
 
+    start_tag = "" if abs(starting - STARTING) < 1e-9 else f"_{int(starting)}"
+    if args.no_heat:
+        OUT = _ROOT / "artifacts" / "pipeline_backtest" / "rolling_wf" / "sprint37_no_heat"
+    elif args.lot_01 and args.no_daily_loss:
+        OUT = (
+            _ROOT
+            / "artifacts"
+            / "pipeline_backtest"
+            / "rolling_wf"
+            / f"sprint37_lot01_nodaily{start_tag}"
+        )
+    elif args.no_daily_loss:
+        OUT = _ROOT / "artifacts" / "pipeline_backtest" / "rolling_wf" / "sprint37_no_daily_loss"
+    elif args.broker_lot:
+        OUT = _ROOT / "artifacts" / "pipeline_backtest" / "rolling_wf" / "sprint37_broker_lot"
+    elif args.lot_01:
+        OUT = _ROOT / "artifacts" / "pipeline_backtest" / "rolling_wf" / f"sprint37_lot01_heat{start_tag}"
     OUT.mkdir(parents=True, exist_ok=True)
-    print("=== Sprint 37 Multi Trade Benchmark ===")
+    if args.no_heat:
+        title = "Sprint 37 Multi Trade — NO HEAT"
+    elif args.lot_01 and args.no_daily_loss:
+        title = f"Sprint 37 Multi Trade — LOT 0.01 + heat, NO daily (start ${starting:.0f})"
+    elif args.no_daily_loss:
+        title = "Sprint 37 Multi Trade — NO DAILY LOSS (heat kept)"
+    elif args.broker_lot:
+        title = "Sprint 37 Multi Trade — BROKER LOT min/step 0.01"
+    elif args.lot_01:
+        title = f"Sprint 37 Multi Trade — LOT 0.01 + heat + daily (start ${starting:.0f})"
+    else:
+        title = "Sprint 37 Multi Trade Benchmark"
+    print(f"=== {title} ===")
     panel = _cache_panel()
     h1 = load_h1(_ROOT / "artifacts/raw/XAUUSD/H1/data.parquet")
     mkt = prepare_market(h1)
@@ -540,21 +784,81 @@ def main(argv: list[str] | None = None) -> int:
     years = sorted(int(y) for y in d["year"].unique())
     print(f"entries={p.n} years={years}")
 
-    engines = candidate_engines()
+    if args.no_heat:
+        engines = no_heat_engines()
+    elif args.lot_01:
+        engines = lot01_heat_engines()
+    elif args.no_daily_loss:
+        engines = no_daily_loss_engines()
+    elif args.broker_lot:
+        engines = broker_lot_engines()
+    else:
+        engines = candidate_engines()
     if args.limit > 0:
         engines = engines[: args.limit]
-    print(f"engines={len(engines)}")
+    print(
+        f"engines={len(engines)} no_heat={bool(args.no_heat)} "
+        f"no_daily_loss={bool(args.no_daily_loss)} broker_lot={bool(args.broker_lot)} "
+        f"lot_01={bool(args.lot_01)} starting={starting:.0f}"
+    )
+
+    def _flags(cfg: EngineCfg) -> tuple[bool, bool, bool, bool]:
+        """Return (no_heat, no_daily_loss, broker_lot, fixed_lot_01)."""
+        if args.no_heat:
+            off = cfg.name != "parallel_mo5_d0.0_cd0_h3.0"
+            return off, off, False, False
+        if args.lot_01:
+            # control keeps ATR scale + daily; *_lot01 force 0.01; heat ON
+            nd = bool(args.no_daily_loss)
+            if cfg.name == "parallel_mo5_d0.0_cd0_h3.0":
+                return False, False, False, False
+            return False, nd, False, True
+        if args.no_daily_loss:
+            if cfg.name == "parallel_mo5_d0.0_cd0_h3.0":
+                return False, False, False, False
+            return False, True, False, False
+        return False, False, False, False
 
     base_cfg = engines[0]
-    base = run_multi(order, p, sim, lot_mult, atr_pct, probs, trend_ok, base_cfg)
+    nh0, nd0, bl0, fl0 = _flags(base_cfg)
+    base = run_multi(
+        order,
+        p,
+        sim,
+        lot_mult,
+        atr_pct,
+        probs,
+        trend_ok,
+        base_cfg,
+        no_heat=nh0,
+        no_daily_loss=nd0,
+        broker_lot=bl0,
+        fixed_lot_01=fl0,
+        starting=starting,
+    )
     base_y = {}
     for y in years:
         idx = np.where(d["year"].to_numpy() == y)[0]
         o = idx[np.argsort(pd.DatetimeIndex(p.ts.iloc[idx]).as_unit("ns").asi8, kind="stable")]
-        base_y[y] = run_multi(o, p, sim, lot_mult, atr_pct, probs, trend_ok, base_cfg)
+        base_y[y] = run_multi(
+            o,
+            p,
+            sim,
+            lot_mult,
+            atr_pct,
+            probs,
+            trend_ok,
+            base_cfg,
+            no_heat=nh0,
+            no_daily_loss=nd0,
+            broker_lot=bl0,
+            fixed_lot_01=fl0,
+            starting=starting,
+        )
     print(
         f"BASELINE pf={base['profit_factor']:.3f} dd={base['max_drawdown']:.3f} "
         f"ret={base['total_return']:.3f} n={base['n_trades']} "
+        f"lot_skips={base.get('lot_skips', 0)} "
         f"2026_ret={base_y.get(2026, {}).get('total_return', float('nan')):.3f}"
     )
 
@@ -568,12 +872,41 @@ def main(argv: list[str] | None = None) -> int:
     winner = None
 
     for k, cfg in enumerate(engines):
-        port = run_multi(order, p, sim, lot_mult, atr_pct, probs, trend_ok, cfg)
+        nh, nd, bl, fl = _flags(cfg)
+        port = run_multi(
+            order,
+            p,
+            sim,
+            lot_mult,
+            atr_pct,
+            probs,
+            trend_ok,
+            cfg,
+            no_heat=nh,
+            no_daily_loss=nd,
+            broker_lot=bl,
+            fixed_lot_01=fl,
+            starting=starting,
+        )
         yports = {}
         for y in years:
             idx = np.where(d["year"].to_numpy() == y)[0]
             o = idx[np.argsort(pd.DatetimeIndex(p.ts.iloc[idx]).as_unit("ns").asi8, kind="stable")]
-            yports[y] = run_multi(o, p, sim, lot_mult, atr_pct, probs, trend_ok, cfg)
+            yports[y] = run_multi(
+                o,
+                p,
+                sim,
+                lot_mult,
+                atr_pct,
+                probs,
+                trend_ok,
+                cfg,
+                no_heat=nh,
+                no_daily_loss=nd,
+                broker_lot=bl,
+                fixed_lot_01=fl,
+                starting=starting,
+            )
             yearly_rows.append(
                 {
                     "engine": cfg.name,
@@ -585,11 +918,21 @@ def main(argv: list[str] | None = None) -> int:
                     "trades": yports[y]["n_trades"],
                     "wr": yports[y]["win_rate"],
                     "blown": yports[y]["blown"],
+                    "no_heat": nh,
+                    "no_daily_loss": nd,
+                    "broker_lot": bl,
+                    "fixed_lot_01": fl,
+                    "lot_skips": yports[y].get("lot_skips", 0),
                 }
             )
 
         y2026 = yports.get(2026, {"profit_factor": 0, "max_drawdown": 1, "total_return": -1, "n_trades": 0})
         row = _metrics_row(cfg, port, y2026=y2026)
+        row["no_heat"] = nh
+        row["no_daily_loss"] = nd
+        row["broker_lot"] = bl
+        row["fixed_lot_01"] = fl
+        row["lot_skips"] = port.get("lot_skips", 0)
         row["pf_gain"] = row["pf"] - base["profit_factor"]
         row["dd_gain"] = base["max_drawdown"] - row["dd"]
         row["trade_gain"] = row["trades"] - base["n_trades"]
@@ -669,7 +1012,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"WINNER (success criteria): {cfg.name} "
                 f"trades={row['trades']} PF={row['pf']:.3f} DD={row['dd']*100:.1f}% ret={row['ret']*100:.0f}%"
             )
-            if not args.full:
+            if (
+                not args.full
+                and not args.no_heat
+                and not args.no_daily_loss
+                and not args.broker_lot
+                and not args.lot_01
+            ):
                 print("early-stop (pass --full to score entire grid)")
                 break
 
@@ -752,17 +1101,65 @@ def main(argv: list[str] | None = None) -> int:
                 "but none clear full bar. STOP per sprint scope."
             )
 
+    if args.no_heat:
+        title = "# Sprint 37 — Multi Trade (NO HEAT)"
+        mode_note = (
+            "Heat OFF: no `heat_budget_r` gate and no daily loss stop. "
+            "max_positions / distance / cooldown still apply. "
+            "Includes prior winner `parallel_mo5_d0.0_cd0_h3.0` WITH heat for comparison."
+        )
+        run_tag = " (`--no-heat`)"
+        base_tag = ", no heat)"
+    elif args.lot_01 and args.no_daily_loss:
+        title = f"# Sprint 37 — Multi Trade (LOT 0.01 + heat, NO daily, start ${starting:.0f})"
+        mode_note = (
+            "Always `lot=0.01`. Heat budget ON; daily loss stop OFF. "
+            "Includes research winner `parallel_mo5_d0.0_cd0_h3.0` WITH ATR-scale + daily for comparison."
+        )
+        run_tag = " (`--lot-01 --no-daily-loss`)"
+        base_tag = ", lot=0.01, no daily)"
+    elif args.no_daily_loss:
+        title = "# Sprint 37 — Multi Trade (NO DAILY LOSS, heat kept)"
+        mode_note = (
+            "Daily loss stop OFF; `heat_budget_r=3R` kept. "
+            "max_positions / distance / cooldown still apply. "
+            "Includes prior winner `parallel_mo5_d0.0_cd0_h3.0` WITH daily loss for comparison."
+        )
+        run_tag = " (`--no-daily-loss`)"
+        base_tag = ", no daily loss)"
+    elif args.broker_lot:
+        title = "# Sprint 37 — Multi Trade (BROKER LOT min/step 0.01)"
+        mode_note = (
+            "Broker volume grid: floor lots to step 0.01; **clamp up to 0.01** if smaller "
+            "(still trade — production fix for MT5 10014). ATR map fractional lots become 0.01. "
+            "Includes research winner `parallel_mo5_d0.0_cd0_h3.0` WITHOUT broker grid for comparison."
+        )
+        run_tag = " (`--broker-lot`)"
+        base_tag = ", broker lot)"
+    elif args.lot_01:
+        title = f"# Sprint 37 — Multi Trade (LOT 0.01 + heat + daily, start ${starting:.0f})"
+        mode_note = (
+            "Always `lot=0.01` (ATR map disabled for sizing). "
+            "`heat_budget_r` + daily loss stop ON. "
+            "Includes research winner `parallel_mo5_d0.0_cd0_h3.0` WITH ATR-scaled lots for comparison."
+        )
+        run_tag = " (`--lot-01`)"
+        base_tag = ", lot=0.01)"
+    else:
+        title = "# Sprint 37 — Multi Trade Benchmark"
+        mode_note = "Only trade-management rules vary."
+        run_tag = " (`--full`)" if args.full else ""
+        base_tag = ")"
+
     lines = [
-        "# Sprint 37 — Multi Trade Benchmark",
+        title,
         "",
-        "Frozen: FEAT7 + LGBM + exit `a0.25_d0.08` + Adaptive ATR `map_conservative`.",
-        "Only trade-management rules vary.",
+        f"Frozen: FEAT7 + LGBM + exit `a0.25_d0.08` + Adaptive ATR `map_conservative`. Starting equity `${starting:.0f}`.",
+        mode_note,
         "",
-        f"Engines evaluated (this run): **{len(bench)}** / planned grid"
-        + (" (`--full`)" if args.full else "")
-        + ".",
+        f"Engines evaluated (this run): **{len(bench)}**{run_tag}.",
         "",
-        "## Baseline (Adaptive ATR, max_pos=1)",
+        f"## Baseline (Adaptive ATR, max_pos=1{base_tag}",
         "",
         "| Engine | Trades | PF | DD | Return | 2026 ret | MC ruin |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -825,6 +1222,51 @@ def main(argv: list[str] | None = None) -> int:
         ),
         "```",
         "",
+    ]
+
+    # always show yearly for baseline + control + best ablation twin / winner
+    focus = ["baseline_single_atr", "parallel_mo5_d0.0_cd0_h3.0"]
+    twin = next(
+        (
+            e
+            for e in lead["engine"]
+            if e.startswith("parallel_mo5_d0.0_cd0")
+            and (
+                e.endswith("_nodaily")
+                or e.endswith("_noheat")
+                or e.endswith("_brokerlot")
+                or e.endswith("_lot01")
+            )
+        ),
+        None,
+    )
+    if twin:
+        focus.append(twin)
+    win_name = (winner or best).get("engine")
+    if win_name and win_name not in focus:
+        focus.append(str(win_name))
+
+    lines += ["## Yearly (key engines)", ""]
+    for eng in focus:
+        yg = yearly[yearly["engine"] == eng].sort_values("year") if not yearly.empty else pd.DataFrame()
+        if yg.empty:
+            continue
+        lines += [f"### {eng}", "", "| Year | Trades | PF | DD | Return |", "|---:|---:|---:|---:|---:|"]
+        for _, r in yg.iterrows():
+            lines.append(
+                f"| {int(r['year'])} | {int(r['trades'])} | {float(r['pf']):.3f} | "
+                f"{float(r['dd'])*100:.1f}% | {float(r['ret'])*100:.0f}% |"
+            )
+        lines.append("")
+        # console mirror
+        print(f"YEARLY {eng}")
+        for _, r in yg.iterrows():
+            print(
+                f"  {int(r['year'])}: trades={int(r['trades'])} PF={float(r['pf']):.3f} "
+                f"DD={float(r['dd'])*100:.1f}% ret={float(r['ret'])*100:.0f}%"
+            )
+
+    lines += [
         "## Artifacts",
         "",
         "- `decision_engine_benchmark.csv`",

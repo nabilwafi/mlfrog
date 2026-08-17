@@ -294,8 +294,8 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn(tid, state.open_positions)
         bus.stop()
 
-    def test_atr_risk_scales_fixed_lot(self) -> None:
-        """map_conservative: atr_pct 0.85 → 25% of FIXED_LOT."""
+    def test_atr_risk_off_keeps_fixed_lot(self) -> None:
+        """ATR map is off: high atr_pct still 0.01 lot."""
         bus = EventBus()
         bus.start(n_workers=1)
         state = PortfolioState(equity=10_000, peak_equity=10_000)
@@ -317,8 +317,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(out["status"], "opened")
         from production import FIXED_LOT
 
-        self.assertAlmostEqual(state.open_positions[out["trade_id"]].lot, FIXED_LOT * 0.25, places=6)
+        self.assertAlmostEqual(state.open_positions[out["trade_id"]].lot, FIXED_LOT, places=6)
         bus.stop()
+
+    def test_daily_stop_only_when_equity_le_80(self) -> None:
+        from production.paper.state import PortfolioState
+
+        fat = PortfolioState(equity=280.0, peak_equity=280.0)
+        fat.day_pnl = -100.0
+        self.assertFalse(fat.daily_heat_blocked())
+
+        thin = PortfolioState(equity=80.0, peak_equity=80.0)
+        thin.day_pnl = -80.0 * 0.01  # exactly 1R
+        self.assertTrue(thin.daily_heat_blocked())
+
+        ok = PortfolioState(equity=80.0, peak_equity=80.0)
+        ok.day_pnl = -0.50
+        self.assertFalse(ok.daily_heat_blocked())
 
     def test_take_profit_disabled(self) -> None:
         bus = EventBus()
