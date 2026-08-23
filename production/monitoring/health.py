@@ -109,13 +109,20 @@ class HealthReporter:
     def publish(self, *, reason: str, status: str = "ok", extra: dict[str, Any] | None = None) -> None:
         self.bus.publish(make_event(EventType.HEALTH, self.snapshot(reason=reason, status=status, extra=extra)))
 
-    def on_http_probe(self) -> None:
-        """Refresh snapshot for HTTP /health — no Telegram spam (background heartbeat owns chat)."""
+    def publish_if_transition(self, *, reason: str = "probe") -> bool:
+        """Snapshot; Telegram only when MT5 just dropped or recovered."""
         prev = self._last_mt5_ok
-        payload = self.snapshot(reason="http_probe")
-        # only alert health chat when MT5 drops
-        if prev is True and self._last_mt5_ok is False:
+        payload = self.snapshot(reason=reason)
+        dropped = prev is True and self._last_mt5_ok is False
+        recovered = prev is False and self._last_mt5_ok is True
+        if dropped or recovered:
             self.bus.publish(make_event(EventType.HEALTH, payload))
+            return True
+        return False
+
+    def on_http_probe(self) -> None:
+        """Refresh snapshot for HTTP /health — Telegram only on MT5 disconnect/reconnect."""
+        self.publish_if_transition(reason="http_probe")
 
     def start(self) -> None:
         self._started_mono = time.monotonic()
@@ -126,7 +133,11 @@ class HealthReporter:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="health-heartbeat", daemon=True)
         self._thread.start()
-        logger.info("health_heartbeat_started interval_s=%s", self.interval_seconds)
+        logger.info(
+            "health_heartbeat_started interval_s=%s probe_s=%s",
+            self.interval_seconds,
+            self._check_interval(),
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -134,9 +145,22 @@ class HealthReporter:
             self._thread.join(timeout=2.0)
         self.publish(reason="stop")
 
+    def _check_interval(self) -> float:
+        # ponytail: probe between heartbeats so disconnect isn't delayed until the next HEALTHCHECK
+        if self.probe_throttle_seconds <= 0:
+            return self.interval_seconds
+        return min(self.probe_throttle_seconds, self.interval_seconds)
+
     def _loop(self) -> None:
-        while not self._stop.wait(self.interval_seconds):
+        last_hb = time.monotonic()
+        wait = self._check_interval()
+        while not self._stop.wait(wait):
             try:
-                self.publish(reason="heartbeat")
+                now = time.monotonic()
+                if (now - last_hb) >= self.interval_seconds:
+                    self.publish(reason="heartbeat")
+                    last_hb = now
+                else:
+                    self.publish_if_transition(reason="probe")
             except Exception:
                 logger.exception("health_heartbeat_failed")

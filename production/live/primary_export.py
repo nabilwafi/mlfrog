@@ -1,4 +1,4 @@
-"""Export frozen primary FEAT7 boosters (fixed params; no HPO)."""
+"""Export frozen primary H1-native boosters (fixed params; no HPO)."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _model_matches(path: Path, feat: list[str]) -> bool:
 
 def ensure_frozen_primary(cfg: dict[str, Any], *, symbol: str, timeframe: str, side: str) -> Path:
     """
-    ponytail: fit FEAT7 on v2 train/val parquet when .txt missing or feature set drifts.
+    ponytail: fit H1-native primary on v2 train/val parquet when .txt missing or feature set drifts.
     Uses RESEARCH_SYMBOL artifacts even when live trades XAUUSDc.
     """
     del symbol  # research artifacts only

@@ -1,0 +1,10 @@
+{
+  "oos_trades": 5524,
+  "oos_winrate": 0.8122737146994932,
+  "median_final_MAE": 0.3549297177851761,
+  "median_final_MFE": 0.4246097359275762,
+  "recover_after_mae_ge_0.50": 0.634978229317852,
+  "n_first_deep_mae": 2756,
+  "is_loser_mae_p50": 0.8812306397913839,
+  "is_loser_mae_p75": 0.9681977397337213
+}

@@ -1,0 +1,14 @@
+{
+  "verdict": "ITERATE",
+  "production_changed": false,
+  "policy": "h1_m5_pullback_recovery",
+  "gates": [
+    "OOS years M5 PF > prod: 4/5",
+    "Passes validation gates \u2014 not PROMOTE until live paper test"
+  ],
+  "delay_stats": {
+    "median_delay_m5": 5.0,
+    "p90_delay_m5": 11.0,
+    "invalidate_rate": 0.0249489349285089
+  }
+}

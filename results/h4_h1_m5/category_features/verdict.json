@@ -1,0 +1,62 @@
+{
+  "baseline": {
+    "policy": "h1_native_6",
+    "n_features": 6,
+    "pf": 1.6001587219925002,
+    "dd": 0.2706574463928747,
+    "avg_r": 0.07727717034356676,
+    "trades": 4988,
+    "ret": 4.184450031179984,
+    "mc_prob_ruin": 0.0003
+  },
+  "best": {
+    "policy": "h1_native_6",
+    "n_features": 6,
+    "pf": 1.6001587219925002,
+    "dd": 0.2706574463928747,
+    "avg_r": 0.07727717034356676,
+    "trades": 4988,
+    "ret": 4.184450031179984,
+    "mc_prob_ruin": 0.0003
+  },
+  "engine_v1_35": {
+    "policy": "engine_v1_35",
+    "n_features": 35,
+    "pf": 1.52585283655513,
+    "dd": 0.460566868380823,
+    "avg_r": 0.08400401669957178,
+    "trades": 4888,
+    "ret": 3.902958155836336,
+    "mc_prob_ruin": 0.0025
+  },
+  "engine_ext_48": {
+    "policy": "engine_ext_48",
+    "n_features": 48,
+    "pf": 1.416694993321249,
+    "dd": 0.6657055400535784,
+    "avg_r": 0.07024173061228917,
+    "trades": 4975,
+    "ret": 3.319053456374988,
+    "mc_prob_ruin": 0.0069
+  },
+  "new_features": [
+    "return_1_atr",
+    "return_5_atr",
+    "return_20_atr",
+    "volume_zscore",
+    "volume_ratio",
+    "spread_zscore",
+    "spread_ratio",
+    "spread_bps",
+    "price_zscore",
+    "bb_position",
+    "roc_3",
+    "roc_12",
+    "momentum_acceleration"
+  ],
+  "unavailable": [
+    "order_flow",
+    "cross_asset",
+    "funding_derivatives"
+  ]
+}

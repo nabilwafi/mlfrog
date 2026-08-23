@@ -492,7 +492,7 @@ paper_trading:
   monitoring_host: 0.0.0.0  # LAN-accessible; use 127.0.0.1 for local-only
   monitoring_port: 8787
   health_interval_seconds: 300   # Telegram heartbeat; 0 = start/stop only
-  health_probe_throttle_seconds: 60  # min gap when /health also notifies Telegram
+  health_probe_throttle_seconds: 60  # re-check MT5 this often; Telegram on disconnect/reconnect
   check_mt5: true                # include MT5 terminal/account in HEALTH (+ 503 if down)
   # MT5 chart clock vs UTC (HF Live often +2 winter / +3 summer). Used by /check_candle.
   mt5_server_utc_offset_hours: 3
@@ -515,9 +515,13 @@ paper_trading:
     error_thread_id: 5                   # execution error topic (reuses chat_id)
     # only set health_chat_id / daily_chat_id / error_chat_id if those go to a different group
 
-# Live/paper policy (sprint38 1000-trade stack). Code defaults in production/__init__.py.
+# Live/paper policy (H1 native + M15 pullback stack). Code defaults in production/__init__.py.
 production:
   primary_top_pct: 0.21
+  entry_mode: m15_pullback   # h1_close | m15_pullback
+  pullback_atr: 0.15
+  pullback_recovery_frac: 0.50
+  max_wait_m15: 16
 
 # Live trading — production schema (sql/production_schema.sql); real order_send with --execute
 live_trading:

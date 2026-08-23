@@ -1,0 +1,19 @@
+{
+  "weak_r": -0.5,
+  "confirm_bars": 2,
+  "n": 5524,
+  "early_exit_rate": 0.2986965966690804,
+  "premature_exit_rate": 0.14500362056480812,
+  "saved_rate": 0.15369297610427227,
+  "p0_avg_r": 0.24753776879590267,
+  "early_avg_r": 0.1346704617467276,
+  "p0_pf": 2.259666665414525,
+  "early_pf": 1.5934190765293428,
+  "delta_avg_r": -0.11286730704917508,
+  "delta_pf": -0.6662475888851822,
+  "note": "Path from Sprint52 (FEAT7-era entries). Overlay is diagnostic vs that P0, not prod v6 panel.",
+  "p0_mc_median_dd": 0.01601146363745805,
+  "early_mc_median_dd": 0.02243262743512628,
+  "p0_mc_ruin": 0.0,
+  "early_mc_ruin": 0.0
+}

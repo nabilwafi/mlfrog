@@ -1,0 +1,39 @@
+feature,group,definition
+ema20_distance_atr,trend,(close - ema20) / atr14
+ema50_distance_atr,trend,(close - ema50) / atr14
+ema20_distance_percent,trend,(close - ema20) / close * 100
+ema50_distance_percent,trend,(close - ema50) / close * 100
+ema_cross_distance,trend,(ema20 - ema50) / atr14
+ema20_slope,trend,(ema20_t - ema20_{t-3}) / 3 / |ema20|
+ema50_slope,trend,(ema50_t - ema50_{t-3}) / 3 / |ema50|
+ema_trend_duration,trend,streak length of (ema20 > ema50) regime
+ema_alignment_score,trend,"mean(close>ema20, close>ema50, ema20>ema50) mapped to [-1,1]"
+atr_percent,volatility,atr14 / close * 100
+atr_percentile_252,volatility,rolling percentile rank of atr14 over 252
+rolling_volatility,volatility,rolling std of log returns (window 20)
+volatility_rank,volatility,rolling rank of rolling_volatility
+volatility_regime_score,volatility,(atr_percentile_252 - 0.5) * 2  [deterministic of CORE]
+macd_normalized,momentum,macd / atr14
+macd_histogram_zscore,momentum,rolling z-score of macd hist (100)
+macd_signal_distance,momentum,(macd - signal) / atr14
+momentum_rank,momentum,rolling rank of pct_change(10)
+rsi_percentile,momentum,rolling percentile of rsi14
+roc_3,momentum,close.pct_change(3)
+roc_12,momentum,close.pct_change(12)
+momentum_acceleration,momentum,"diff(pct_change(6), 3)"
+body_percent,candle,|close-open| / (high-low)
+upper_wick_percent,candle,upper wick / range
+lower_wick_percent,candle,lower wick / range
+close_position,candle,(close-low)/(high-low)
+range_percent,candle,(high-low)/close * 100
+body_rank,candle,rolling rank of body_percent
+hour_sin,session,sin(2π hour/24)
+hour_cos,session,cos(2π hour/24)
+day_sin,session,sin(2π weekday/7)
+day_cos,session,cos(2π weekday/7)
+rolling_zscore,statistical,(ret - mean20) / std20
+rolling_percentile,statistical,fraction of window returns ≤ current ret
+rolling_rank,statistical,"average-rank of current ret in window / n → [0,1]"
+rolling_quantile,statistical,"window quantile(q=0.75) of returns (LEVEL, not rank)"
+rolling_std,statistical,std20 of returns
+rolling_mean_distance,statistical,(ret - mean20) / std20  [≈ rolling_zscore]

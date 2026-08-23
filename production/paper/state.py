@@ -11,6 +11,29 @@ from production import DAILY_LOSS_STOP_R, DAILY_ON_EQUITY_MAX, RISK_BASE
 
 
 @dataclass
+class PendingEntry:
+    """H1 signal waiting for M15 pullback fill."""
+
+    signal_id: str
+    bar_key: str
+    symbol: str
+    side: str
+    h1_timestamp: datetime
+    h1_ref_price: float
+    atr: float
+    probability: float
+    meta_probability: float
+    confidence: float
+    atr_percentile: float
+    session: str
+    regime: str
+    trend: str
+    volatility: str
+    momentum: str
+    structure: str
+
+
+@dataclass
 class OpenPosition:
     trade_id: str  # str(ticket_id) — primary runtime key
     signal_id: str
@@ -47,6 +70,7 @@ class PortfolioState:
     day_pnl: float = 0.0
     heat_triggered_today: int = 0
     open_positions: dict[str, OpenPosition] = field(default_factory=dict)
+    pending_entries: list[PendingEntry] = field(default_factory=list)
     seen_signal_keys: set[str] = field(default_factory=set)  # idempotency
     meta_rejects: int = 0
     confidence_rejects: int = 0

@@ -1,0 +1,28 @@
+{
+  "reason": "no core+group improves PF without DD +5pp vs CORE",
+  "core_pf": 1.6001587219925002,
+  "core_dd": 0.2706574463928747,
+  "best_group": {
+    "policy": "E_core_plus_candle",
+    "n_features": 12,
+    "features": "hour_cos,atr_percentile_252,ema_trend_duration,rolling_quantile,hour_sin,atr_percent,body_percent,upper_wick_percent,lower_wick_percent,close_position,range_percent,body_rank",
+    "pf": 1.484965940268386,
+    "dd": 0.4794492507951752,
+    "avg_r": 0.0744106959459207,
+    "wr": 0.8096099718536389,
+    "trades": 4974,
+    "ret": 3.574782956344863,
+    "mc_prob_ruin": 0.0002,
+    "mc_p5": 17.873914781724295,
+    "mc_p50": 17.873914781724356,
+    "mc_p95": 17.873914781724416,
+    "mc_median_dd": 0.2243279877956205,
+    "long_pf": 1.4278257464403474,
+    "long_dd": 0.3734209799911361,
+    "long_trades": 1636,
+    "short_pf": 1.540200251310356,
+    "short_dd": 0.4961983743077384,
+    "short_trades": 3491,
+    "ok": false
+  }
+}

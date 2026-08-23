@@ -5,14 +5,17 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
+
+import pandas as pd
 
 from production import (
     BLOCK_OPPOSITE_SIDE,
     CONFIDENCE_ENABLED,
     CONFIDENCE_SKIP,
+    ENTRY_MODE,
     EXIT_MODE,
     FEATURE_VERSION,
     FIXED_LOT,
@@ -37,9 +40,10 @@ from production import (
 )
 from production.events.bus import EventBus
 from production.events.types import EventType, make_event
+from production.live.entry_execution import evaluate_m15_pullback
 from production.paper.broker import PaperBroker
 from production.paper.edge_sizing import expected_r_from_edge, risk_pct_from_edge
-from production.paper.state import OpenPosition, PortfolioState
+from production.paper.state import OpenPosition, PendingEntry, PortfolioState
 from research.portfolio_backtest.services.engine import _lots_from_equity
 from settings.strategy import SL_ATR_MULT, TP_ATR_MULT
 
@@ -66,6 +70,7 @@ class IncomingSignal:
     momentum: str = "unknown"
     structure: str = "unknown"
     bar_key: str = ""  # for idempotency
+    h1_ref_price: float | None = None  # H1 close for M15 pullback; defaults to entry_price
 
 
 class SignalSource(Protocol):
@@ -100,11 +105,118 @@ class ProductionPipeline:
         corr = uuid.uuid4().hex
         signal_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{sig.symbol}:{sig.side}:{sig.bar_key or sig.timestamp.isoformat()}").hex
 
-        # Duplicate prevention
         dup_key = f"{signal_id}"
         if not self.state.register_signal_key(dup_key):
             self._skip(corr, signal_id, sig, "duplicate", None, None)
             return {"status": "skipped", "reason": "duplicate", "correlation_id": corr}
+
+        inference_ms = (time.perf_counter() - t_inf0) * 1000
+        self.bus.publish(
+            make_event(EventType.METRIC, {"name": "inference_latency_ms", "value": inference_ms}, correlation_id=corr)
+        )
+
+        if str(ENTRY_MODE).lower() == "m15_pullback":
+            return self._queue_pending(sig, signal_id=signal_id, corr=corr)
+
+        return self._open_position(sig, signal_id=signal_id, corr=corr)
+
+    def try_pending_fills(self, m15_ohlc: pd.DataFrame) -> list[dict[str, Any]]:
+        """Evaluate queued H1 signals on each closed M15 bar."""
+        if str(ENTRY_MODE).lower() != "m15_pullback" or not self.state.pending_entries:
+            return []
+        outcomes: list[dict[str, Any]] = []
+        still_pending: list[PendingEntry] = []
+        for pending in self.state.pending_entries:
+            res = evaluate_m15_pullback(
+                side=pending.side,
+                h1_signal_ts=pending.h1_timestamp,
+                h1_ref_price=pending.h1_ref_price,
+                atr=pending.atr,
+                m15_ohlc=m15_ohlc,
+            )
+            if res.outcome == "pending":
+                still_pending.append(pending)
+                continue
+            sig = IncomingSignal(
+                timestamp=pending.h1_timestamp,
+                symbol=pending.symbol,
+                side=pending.side,
+                probability=pending.probability,
+                meta_probability=pending.meta_probability,
+                confidence=pending.confidence,
+                entry_price=float(pending.h1_ref_price),
+                atr=pending.atr,
+                atr_percentile=pending.atr_percentile,
+                session=pending.session,
+                regime=pending.regime,
+                trend=pending.trend,
+                volatility=pending.volatility,
+                momentum=pending.momentum,
+                structure=pending.structure,
+                bar_key=pending.bar_key,
+                h1_ref_price=pending.h1_ref_price,
+            )
+            if res.outcome == "invalidate":
+                corr = uuid.uuid4().hex
+                self._skip(corr, pending.signal_id, sig, f"entry_{res.reason}", None, None)
+                outcomes.append({"status": "skipped", "reason": res.reason, "signal_id": pending.signal_id})
+                continue
+            fill_ts = res.fill_timestamp or pending.h1_timestamp
+            fill_sig = replace(
+                sig,
+                timestamp=fill_ts,
+                entry_price=float(res.fill_price or pending.h1_ref_price),
+            )
+            outcomes.append(
+                self._open_position(fill_sig, signal_id=pending.signal_id, corr=uuid.uuid4().hex)
+            )
+        self.state.pending_entries = still_pending
+        return outcomes
+
+    def _queue_pending(self, sig: IncomingSignal, *, signal_id: str, corr: str) -> dict[str, Any]:
+        h1_ref = float(sig.h1_ref_price if sig.h1_ref_price is not None else sig.entry_price)
+        pending = PendingEntry(
+            signal_id=signal_id,
+            bar_key=sig.bar_key,
+            symbol=sig.symbol,
+            side=str(sig.side).lower(),
+            h1_timestamp=sig.timestamp if sig.timestamp.tzinfo else sig.timestamp.replace(tzinfo=timezone.utc),
+            h1_ref_price=h1_ref,
+            atr=float(sig.atr),
+            probability=float(sig.probability),
+            meta_probability=float(sig.meta_probability),
+            confidence=float(sig.confidence),
+            atr_percentile=float(sig.atr_percentile),
+            session=sig.session,
+            regime=sig.regime,
+            trend=sig.trend,
+            volatility=sig.volatility,
+            momentum=sig.momentum,
+            structure=sig.structure,
+        )
+        self.state.pending_entries = [p for p in self.state.pending_entries if p.symbol != sig.symbol]
+        self.state.pending_entries.append(pending)
+        self.bus.publish(
+            make_event(
+                EventType.AUDIT,
+                {
+                    "component": "pipeline",
+                    "action": "pending_entry",
+                    "detail": {
+                        "signal_id": signal_id,
+                        "side": pending.side,
+                        "h1_ref_price": h1_ref,
+                        "entry_mode": ENTRY_MODE,
+                    },
+                },
+                correlation_id=corr,
+            )
+        )
+        return {"status": "pending", "signal_id": signal_id, "correlation_id": corr}
+
+    def _open_position(self, sig: IncomingSignal, *, signal_id: str, corr: str) -> dict[str, Any]:
+        now = sig.timestamp if sig.timestamp.tzinfo else sig.timestamp.replace(tzinfo=timezone.utc)
+        self.state.roll_day(now)
 
         # Multi-entry cap + optional no-opposite + parallel filters (Sprint 37)
         n_open = len(self.state.open_positions)
@@ -159,14 +271,10 @@ class ProductionPipeline:
             "label_version": LABEL_VERSION,
             "pipeline_version": PIPELINE_VERSION,
             "accepted": False,
+            "entry_mode": ENTRY_MODE,
             "session": sig.session,
             "regime": sig.regime,
         }
-
-        inference_ms = (time.perf_counter() - t_inf0) * 1000
-        self.bus.publish(
-            make_event(EventType.METRIC, {"name": "inference_latency_ms", "value": inference_ms}, correlation_id=corr)
-        )
 
         # Meta as gate only if restored; step 3 = edge for sizing only
         if META_AS_GATE and float(sig.meta_probability) < META_THRESHOLD:
@@ -326,6 +434,8 @@ class ProductionPipeline:
                 "heat_slots": add_heat,
                 "edge_score": edge,
                 "initial_sl": sl,
+                "entry_mode": ENTRY_MODE,
+                "h1_ref_price": float(sig.h1_ref_price or sig.entry_price),
             },
         )
         self.state.open_positions[ticket_key] = pos

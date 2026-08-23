@@ -62,6 +62,9 @@ class PaperRuntime:
                     now = datetime.now(timezone.utc)
                     self.pipeline.reconcile_broker_positions(timestamp=now)
                     manage = getattr(tick, "manage_bar", None) or tick.bar
+                    m15_hist = getattr(tick, "m15_bars", None)
+                    if manage is not None and m15_hist is not None:
+                        self.pipeline.try_pending_fills(m15_hist)
                     if manage is not None:
                         ts_m = manage.timestamp if manage.timestamp.tzinfo else manage.timestamp.replace(tzinfo=timezone.utc)
                         self.pipeline.on_bar(high=manage.high, low=manage.low, close=manage.close, timestamp=ts_m)

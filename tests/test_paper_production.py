@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -57,6 +58,15 @@ class BusTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._entry_patch = patch("production.paper.pipeline.ENTRY_MODE", "h1_close")
+        cls._entry_patch.start()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._entry_patch.stop()
+
     def test_low_primary_still_opens_with_fixed_lot(self) -> None:
         """Fixed 0.01 lot: low primary still opens (not a skip gate)."""
         bus = EventBus()
@@ -451,6 +461,113 @@ class PipelineTests(unittest.TestCase):
         bus.stop()
 
 
+class ProductionPolicyTests(unittest.TestCase):
+    def test_primary_features_h1_native_six(self) -> None:
+        from production import PRIMARY_FEATURES
+
+        self.assertEqual(len(PRIMARY_FEATURES), 6)
+        self.assertNotIn("ctx_h4_swing_quality", PRIMARY_FEATURES)
+
+    def test_m15_pullback_queues_then_fills(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        h1_ts = datetime(2024, 1, 2, 10, tzinfo=timezone.utc)
+        sig = IncomingSignal(
+            timestamp=h1_ts,
+            symbol="XAUUSD",
+            side="long",
+            probability=0.6,
+            meta_probability=0.55,
+            confidence=55,
+            entry_price=2000.0,
+            h1_ref_price=2000.0,
+            atr=4.0,
+            bar_key="pb:1",
+        )
+        with patch("production.paper.pipeline.ENTRY_MODE", "m15_pullback"):
+            queued = pipe.process_signal(sig)
+        self.assertEqual(queued["status"], "pending")
+        self.assertEqual(len(state.pending_entries), 1)
+
+        rows = []
+        t0 = pd.Timestamp("2024-01-02 06:00:00", tz="UTC")
+        for i in range(18):
+            rows.append(
+                {
+                    "timestamp": t0 + pd.Timedelta(minutes=15 * i),
+                    "open": 2000.0,
+                    "high": 2001.0,
+                    "low": 1999.0,
+                    "close": 2000.0,
+                }
+            )
+        # After H1 10:00 — pullback then recovery; fill at next M15 open
+        rows.append(
+            {
+                "timestamp": pd.Timestamp("2024-01-02 10:15:00", tz="UTC"),
+                "open": 2000.0,
+                "high": 2000.5,
+                "low": 1998.0,
+                "close": 1999.5,
+            }
+        )
+        rows.append(
+            {
+                "timestamp": pd.Timestamp("2024-01-02 10:30:00", tz="UTC"),
+                "open": 1999.5,
+                "high": 2000.5,
+                "low": 1999.0,
+                "close": 2000.2,
+            }
+        )
+        m15 = pd.DataFrame(rows)
+        with patch("production.paper.pipeline.ENTRY_MODE", "m15_pullback"):
+            fills = pipe.try_pending_fills(m15)
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0]["status"], "opened")
+        self.assertEqual(len(state.pending_entries), 0)
+        self.assertEqual(len(state.open_positions), 1)
+        bus.stop()
+
+    def test_m15_pullback_invalidates_on_adverse_move(self) -> None:
+        bus = EventBus()
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        pipe = ProductionPipeline(bus=bus, state=state, broker=PaperBroker())
+        h1_ts = datetime(2024, 1, 2, 10, tzinfo=timezone.utc)
+        sig = IncomingSignal(
+            timestamp=h1_ts,
+            symbol="XAUUSD",
+            side="long",
+            probability=0.6,
+            meta_probability=0.55,
+            confidence=55,
+            entry_price=2000.0,
+            h1_ref_price=2000.0,
+            atr=4.0,
+            bar_key="pb:inv",
+        )
+        with patch("production.paper.pipeline.ENTRY_MODE", "m15_pullback"):
+            pipe.process_signal(sig)
+            # 1R adverse for long: low <= ref - 1.5*atr = 1994
+            m15 = pd.DataFrame(
+                [{
+                    "timestamp": "2024-01-02 10:15:00+00:00",
+                    "open": 2000.0,
+                    "high": 2000.0,
+                    "low": 1993.0,
+                    "close": 1995.0,
+                }]
+            )
+            fills = pipe.try_pending_fills(m15)
+        self.assertEqual(fills[0]["status"], "skipped")
+        self.assertEqual(len(state.open_positions), 0)
+        self.assertEqual(len(state.pending_entries), 0)
+        bus.stop()
+
+
 class TelegramFmtTests(unittest.TestCase):
     def test_fmt_new_trade(self) -> None:
         text = fmt_new_trade(
@@ -781,6 +898,58 @@ class HealthReporterTests(unittest.TestCase):
         time.sleep(0.2)
         bus.stop()
         self.assertTrue(any("mt5_down" in r for r in reasons))
+
+    def test_http_probe_notifies_on_disconnect_and_reconnect(self) -> None:
+        bus = EventBus()
+        reasons: list[str] = []
+        bus.subscribe(EventType.HEALTH, lambda e: reasons.append(str(e.payload.get("reason"))))
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        flag = {"ok": True}
+
+        def probe() -> dict:
+            return {"mt5": "connected"} if flag["ok"] else {"mt5": "down", "mt5_error": "x"}
+
+        hr = HealthReporter(bus, state, interval_seconds=0, probe_throttle_seconds=0, mt5_probe=probe)
+        hr.publish(reason="start")
+        hr.on_http_probe()  # still connected — no extra event
+        flag["ok"] = False
+        hr.on_http_probe()
+        flag["ok"] = True
+        hr.on_http_probe()
+        time.sleep(0.2)
+        bus.stop()
+        self.assertTrue(any("mt5_down" in r for r in reasons))
+        self.assertTrue(any("mt5_up" in r for r in reasons))
+        self.assertEqual(reasons.count("http_probe"), 0)
+
+    def test_disconnect_notifies_before_heartbeat(self) -> None:
+        bus = EventBus()
+        reasons: list[str] = []
+        bus.subscribe(EventType.HEALTH, lambda e: reasons.append(str(e.payload.get("reason"))))
+        bus.start(n_workers=1)
+        state = PortfolioState(equity=10_000, peak_equity=10_000)
+        flag = {"ok": True}
+
+        def probe() -> dict:
+            return {"mt5": "connected"} if flag["ok"] else {"mt5": "down", "mt5_error": "x"}
+
+        hr = HealthReporter(
+            bus,
+            state,
+            interval_seconds=30,
+            probe_throttle_seconds=0.1,
+            mt5_probe=probe,
+        )
+        hr.start()
+        time.sleep(0.15)
+        flag["ok"] = False
+        time.sleep(0.35)
+        hr.stop()
+        time.sleep(0.2)
+        bus.stop()
+        self.assertTrue(any("mt5_down" in r for r in reasons))
+        self.assertFalse(any(str(r).startswith("heartbeat") for r in reasons))
 
 
 class LiveSourceTests(unittest.TestCase):

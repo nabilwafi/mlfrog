@@ -1,0 +1,9 @@
+{
+  "A_long_oos_rate": 0.4365651250478109,
+  "A_short_oos_rate": 0.4560062903454882,
+  "B_long_oos_rate": 0.11673486933954372,
+  "B_short_oos_rate": 0.12190817223663745,
+  "definition_A": "opposite 1ATR before favor 1ATR within 8 H1",
+  "definition_B": "adverse 1ATR with MFE<0.25ATR within 8 H1",
+  "note": "Entry TB labels are NOT these; separate management labels."
+}

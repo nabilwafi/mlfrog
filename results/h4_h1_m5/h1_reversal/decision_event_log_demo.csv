@@ -1,0 +1,4 @@
+scenario,action,reason,p_long,p_short,unrealized_r,mfe_r,p_reversal,h4,m5
+hold,HOLD_LONG,thesis_valid,0.68,0.22,0.72,0.8,,,
+weaken,WAIT_FOR_CONFIRMATION,long_thesis_weakening,,,,,,,
+confirm_exit,EXIT_LONG,bearish_reversal_confirmed,0.28,0.74,,,0.82,conflicting,deteriorating

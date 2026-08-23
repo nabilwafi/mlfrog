@@ -35,6 +35,10 @@ class MomentumBuilder(BaseFeatureBuilder):
         momentum = close.pct_change(int(self.params.get("momentum_lookback", 10)))
         momentum_rank = rolling_rank(momentum, rank_window)
         rsi_percentile = rolling_percentile(rsi14, rank_window)
+        roc_3 = close.pct_change(3)
+        roc_12 = close.pct_change(12)
+        mom_base = close.pct_change(6)
+        momentum_acceleration = mom_base.diff(3)
 
         specs: list[tuple[str, pd.Series, tuple[str, ...], str]] = [
             (
@@ -66,6 +70,24 @@ class MomentumBuilder(BaseFeatureBuilder):
                 rsi_percentile,
                 ("rsi_14",),
                 "Rolling percentile of RSI (regime-robust).",
+            ),
+            (
+                "roc_3",
+                roc_3,
+                ("close",),
+                "3-bar rate of change.",
+            ),
+            (
+                "roc_12",
+                roc_12,
+                ("close",),
+                "12-bar rate of change.",
+            ),
+            (
+                "momentum_acceleration",
+                momentum_acceleration,
+                ("close",),
+                "Change in 6-bar momentum over 3 bars.",
             ),
         ]
         return [

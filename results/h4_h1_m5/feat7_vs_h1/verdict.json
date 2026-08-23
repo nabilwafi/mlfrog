@@ -1,0 +1,32 @@
+{
+  "verdict": "H1_NATIVE",
+  "feat7_pullback": {
+    "pf": 1.4354286962484017,
+    "dd": 0.5404601761324715,
+    "avg_r": 0.06999075095933134,
+    "trades": 4928
+  },
+  "h1_native_pullback": {
+    "pf": 1.6001587219925002,
+    "dd": 0.2706574463928747,
+    "avg_r": 0.07727717034356676,
+    "trades": 4988
+  },
+  "production_features": [
+    "hour_cos",
+    "atr_percentile_252",
+    "ema_trend_duration",
+    "rolling_quantile",
+    "hour_sin",
+    "atr_percent",
+    "ctx_h4_swing_quality"
+  ],
+  "h1_native_features": [
+    "hour_cos",
+    "atr_percentile_252",
+    "ema_trend_duration",
+    "rolling_quantile",
+    "hour_sin",
+    "atr_percent"
+  ]
+}

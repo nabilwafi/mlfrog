@@ -1,6 +1,7 @@
 """Production paper/live policy knobs (research-locked stack).
 
-Locked: FEAT7 primary + top 21% + ATR trail a0.25/d0.08 on M15 close
+Locked: H1 native 6-feat primary + top 21% + M15 pullback entry
++ ATR trail a0.25/d0.08 on M15 close
 + fixed lot 0.01 (no ATR scale)
 + Parallel multi-trade max_open=5, dist=0 ATR, cooldown=0, heat_budget=3R
 + daily 1R only while equity <= $80 (else daily OFF).
@@ -9,7 +10,7 @@ All UTC hours (no session gate). No TP / no short time-exit (horizon = research 
 
 from __future__ import annotations
 
-# Canonical FS forward-selection order (LGBM determinism).
+# Canonical H1 native feature set (research winner vs FEAT7).
 PRIMARY_FEATURES: tuple[str, ...] = (
     "hour_cos",
     "atr_percentile_252",
@@ -17,8 +18,16 @@ PRIMARY_FEATURES: tuple[str, ...] = (
     "rolling_quantile",
     "hour_sin",
     "atr_percent",
-    "ctx_h4_swing_quality",
 )
+
+# --- Entry execution ---
+# h1_close = immediate fill at H1 close (legacy)
+# m15_pullback = wait for 0.15 ATR pullback + 50% recovery on M15 (research winner)
+ENTRY_MODE: str = "m15_pullback"
+PULLBACK_ATR: float = 0.15
+PULLBACK_RECOVERY_FRAC: float = 0.50
+MAX_WAIT_M15: int = 16  # = 4 H1 bars
+ADV_INVALIDATE_R: float = 1.0
 
 # --- Gates ---
 META_AS_GATE: bool = False
@@ -60,7 +69,7 @@ ATR_RISK_MULTS: tuple[float, ...] = (1.0, 0.70, 0.40, 0.25, 0.10)
 EXIT_MODE: str = "atr_trail"  # atr_trail | barrier
 TRAIL_ATR_MULT: float = 0.08
 TRAIL_ACTIVATE_R: float = 0.25  # activate after +0.25R (R = SL_ATR * atr)
-# Entry stays H1. Trail ratchet + SL mark use this closed-bar clock.
+# Signal on H1 close; fill on M15 pullback; trail ratchet on M15 close clock.
 TRAIL_TIMEFRAME: str = "M15"
 TAKE_PROFIT_ENABLED: bool = False
 EXIT_HORIZON_BARS: int = 48  # research CAP in H1 bars; scaled to TRAIL_TIMEFRAME
@@ -73,6 +82,7 @@ def trail_horizon_bars() -> int:
     """48 H1 bars → equivalent closed bars on TRAIL_TIMEFRAME (M15 → 192)."""
     tf = _TF_SECONDS.get(str(TRAIL_TIMEFRAME).upper(), 3600)
     return max(1, int(round(int(EXIT_HORIZON_BARS) * 3600 / tf)))
+
 
 # --- Account sync (MT5 account_info) ---
 USE_ACCOUNT_EQUITY: bool = True
@@ -87,11 +97,11 @@ EXECUTION_ENABLED: bool = False  # dry-run by default; set True to send real ord
 LIVE_SYMBOL: str = "XAUUSDc"
 RESEARCH_SYMBOL: str = "XAUUSD"
 
-MODEL_VERSION: str = "primary_feat7_frozen"
+MODEL_VERSION: str = "primary_h1_native_frozen"
 META_VERSION: str = "meta_lgbm_frozen"
-FEATURE_VERSION: str = "fs7_feat"
+FEATURE_VERSION: str = "h1_native6"
 LABEL_VERSION: str = "triple_barrier_v1"
-PIPELINE_VERSION: str = "prod_v5_feat7_top21_a025_d008_lot01_daily80_m15trail"
+PIPELINE_VERSION: str = "prod_v6_h1native_m15pullback_top21_a025_d008_lot01_daily80_m15trail"
 
 
 def atr_risk_mult(atr_percentile: float) -> float:

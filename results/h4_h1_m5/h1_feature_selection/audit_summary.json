@@ -1,0 +1,14 @@
+{
+  "n_matrix_rows": 68356,
+  "n_features": 38,
+  "n_baseline": 6,
+  "n_candidates": 32,
+  "n_high_corr_pairs": 27,
+  "near_identical": [
+    "rolling_zscore ~= rolling_mean_distance"
+  ],
+  "deterministic_of_core": [
+    "volatility_regime_score <- atr_percentile_252"
+  ],
+  "quality_flags": []
+}

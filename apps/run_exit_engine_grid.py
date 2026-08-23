@@ -95,8 +95,9 @@ REASONS = ("SL", "TRAIL", "BREAKEVEN", "TP", "TIMEOUT")
 
 
 # --------------------------------------------------------------------------- entries
-def build_entry_panel() -> pd.DataFrame:
+def build_entry_panel(*, top_pct: float | None = None) -> pd.DataFrame:
     """Train per-window 7-feature models once; identical entries for all combos."""
+    gate = float(TOP_PCT if top_pct is None else top_pct)
     long_df = _load_side("long")
     short_df = _load_side("short")
     h1 = load_h1(_ROOT / "artifacts/raw/XAUUSD/H1/data.parquet")
@@ -119,7 +120,7 @@ def build_entry_panel() -> pd.DataFrame:
             continue
         e = build_test_entries(
             long_df=long_df, short_df=short_df, h1=h1, feat=shared, window=w,
-            boosters=boosters, top_pct=TOP_PCT, vol_lo=vol_lo, vol_hi=vol_hi,
+            boosters=boosters, top_pct=gate, vol_lo=vol_lo, vol_hi=vol_hi,
         )
         if not e.empty:
             panels.append(e.assign(test_year=w.test_year))

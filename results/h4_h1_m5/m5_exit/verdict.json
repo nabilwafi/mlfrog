@@ -1,0 +1,32 @@
+{
+  "verdict": "ITERATE",
+  "production_changed": false,
+  "pullback_m15": {
+    "policy": "h1_pullback_m15_proper",
+    "entry": "pullback_recovery",
+    "exit_tf": "M15",
+    "entry_mode": "m5_pullback",
+    "pf": 1.526561049477992,
+    "dd": 0.2727242821981358,
+    "avg_r": 0.07591149784632502,
+    "wr": 0.8155048076923077,
+    "trades": 4992,
+    "ret": 3.7482339893622467,
+    "mc_prob_ruin": 0.0004,
+    "mc_median_dd": 0.21262045529228601
+  },
+  "pullback_m5": {
+    "policy": "h1_pullback_m5",
+    "entry": "pullback_recovery",
+    "exit_tf": "M5",
+    "entry_mode": "m5_pullback",
+    "pf": 1.2076404384002046,
+    "dd": 0.8154348896907586,
+    "avg_r": 0.01737930554528707,
+    "wr": 0.8140343698854338,
+    "trades": 4888,
+    "ret": 1.4583728525135855,
+    "mc_prob_ruin": 0.0126,
+    "mc_median_dd": 0.3529548225557101
+  }
+}

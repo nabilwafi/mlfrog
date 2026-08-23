@@ -1,0 +1,6 @@
+{
+  "verdict": "ITERATE",
+  "best_h4_m5_strategy": "pullback_recovery",
+  "best_h1_m5_strategy": "pullback_recovery",
+  "production_changed": false
+}

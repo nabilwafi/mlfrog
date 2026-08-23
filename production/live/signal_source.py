@@ -41,6 +41,7 @@ class LiveTick:
     bar: ClosedBar | None
     signals: list[IncomingSignal]
     manage_bar: ClosedBar | None = None
+    m15_bars: pd.DataFrame | None = None
 
 
 class LiveMT5SignalSource:
@@ -116,15 +117,31 @@ class LiveMT5SignalSource:
         logger.info("live_trail_bar_closed tf=%s ts=%s close=%s", self._trail_tf, ts.isoformat(), row["close"])
         return self._closed_bar(row, ts, self._trail_tf)
 
+    def _fetch_m15_history(self) -> pd.DataFrame | None:
+        """Closed M15 OHLC window for pullback entry evaluation."""
+        if self._trail_tf != "M15":
+            return None
+        try:
+            m15 = self._feed.fetch("M15", count=max(32, self._history * 4))
+        except Exception:
+            logger.exception("live_m15_history_failed")
+            return None
+        if m15 is None or m15.empty:
+            return None
+        out = m15.copy()
+        out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True)
+        return out.sort_values("timestamp").reset_index(drop=True)
+
     def poll(self) -> LiveTick:
         manage_bar = self._poll_manage_bar()
+        m15_bars = self._fetch_m15_history() if manage_bar is not None else None
         try:
             closed = self._feed.latest_closed_bar(self._timeframe)
         except Exception:
             logger.exception("live_poll_failed")
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
         if closed is None or closed.empty:
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
         row = closed.iloc[0]
         ts = pd.Timestamp(row["timestamp"])
         if ts.tzinfo is None:
@@ -132,7 +149,7 @@ class LiveMT5SignalSource:
         else:
             ts = ts.tz_convert("UTC")
         if self._last_bar_ts is not None and ts <= self._last_bar_ts:
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
 
         # Weekend / holiday: last MT5 bar is fully closed but stale — seed cursor only.
         # Without this, bot "eats" Friday as a live bar then looks stuck until next close.
@@ -144,7 +161,7 @@ class LiveMT5SignalSource:
                     "live_market_closed_seed_cursor ts=%s — waiting for first bar after reopen",
                     ts.isoformat(),
                 )
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
 
         if self._market_was_closed:
             logger.info("live_market_reopened first_bar_ts=%s", ts.isoformat())
@@ -157,15 +174,15 @@ class LiveMT5SignalSource:
             m5 = self._feed.fetch("M5", count=min(2000, self._history * 12))
             if h1.empty:
                 logger.warning("live_h1_empty ts=%s — MT5 history missing?", ts)
-                return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+                return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
             panel = self._features.build_panel(h1=h1, h4=h4, d1=d1, m5=m5)
         except Exception:
             logger.exception("live_feature_build_failed ts=%s", ts)
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
 
         if panel.empty:
             logger.warning("live_feature_panel_empty ts=%s", ts)
-            return LiveTick(bar=None, signals=[], manage_bar=manage_bar)
+            return LiveTick(bar=None, signals=[], manage_bar=manage_bar, m15_bars=m15_bars)
 
         # only advance cursor after we can actually emit a bar
         self._last_bar_ts = ts
@@ -220,7 +237,7 @@ class LiveMT5SignalSource:
             row["close"],
             len(signals),
         )
-        return LiveTick(bar=bar, signals=signals, manage_bar=manage_bar)
+        return LiveTick(bar=bar, signals=signals, manage_bar=manage_bar, m15_bars=m15_bars)
 
 
 def _to_incoming(scored: ScoredSignal, *, symbol: str) -> IncomingSignal:
@@ -235,6 +252,7 @@ def _to_incoming(scored: ScoredSignal, *, symbol: str) -> IncomingSignal:
         meta_probability=scored.meta_probability,
         confidence=scored.confidence,
         entry_price=scored.entry_price,
+        h1_ref_price=scored.entry_price,
         atr=scored.atr,
         atr_percentile=float(scored.atr_percentile),
         session=scored.session,
